@@ -1,0 +1,589 @@
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+
+import time
+import re
+
+
+class Chennai_Professional_Tax:
+
+    def __init__(self, data, session=None):
+
+        self.data = data
+        self.session = session      # live session dict from automation_framework.py
+        self.logger = None          # AutomationService instance, set by the framework
+        self.driver = None
+        self.wait = None
+
+        self.add_log("Application Started")
+
+    def add_log(self, msg):
+
+        if self.logger:
+            self.logger.add_log(msg)
+
+        print(msg)
+
+    def set_progress(self, value):
+        if self.logger and hasattr(self.logger, "set_progress"):
+            self.logger.set_progress(value)
+
+    # ============================================================
+    # DRIVER SETUP
+    # ============================================================
+
+    def setup_driver(self):
+        options = Options()
+
+        options.add_argument("--start-maximized")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-popup-blocking")
+        # options.add_argument("--headless=new")
+
+        options.add_experimental_option(
+            "prefs",
+            {
+                "profile.default_content_setting_values.popups": 1
+            }
+        )
+
+        self.driver = webdriver.Chrome(options=options)
+        self.wait = WebDriverWait(self.driver, 20)
+
+    # ============================================================
+    # LOGIN
+    # ============================================================
+
+    def login(self):
+
+        self.driver.get("https://erp.chennaicorporation.gov.in/e-portal/login.do")
+
+        self.wait.until(
+            EC.presence_of_element_located((By.ID, "j_username"))
+        ).send_keys(self.data["username"])
+
+        self.wait.until(
+            EC.presence_of_element_located((By.NAME, "j_password"))
+        ).send_keys(self.data["password"])
+
+        self.wait.until(
+            EC.element_to_be_clickable((By.ID, "loginbtn"))
+        ).click()
+
+        self.add_log("Login Successful")
+
+    # ============================================================
+    # CREATE SERVICE REQUEST
+    # ============================================================
+
+    def create_service_request(self):
+
+        self.wait.until(
+            EC.element_to_be_clickable(
+                (By.LINK_TEXT, "Create Service Request")
+            )
+        ).click()
+
+        self.wait.until(
+            EC.frame_to_be_available_and_switch_to_it(
+                (By.NAME, "mainctrl")
+            )
+        )
+
+        self.add_log("Create Service Request Clicked")
+
+    # ============================================================
+    # SELECT CATEGORY & SERVICE
+    # ============================================================
+
+    def select_service(self):
+
+        category = self.wait.until(
+            EC.presence_of_element_located(
+                (By.ID, "servicecategory")
+            )
+        )
+
+        Select(category).select_by_value("190")
+
+        service = self.wait.until(
+            EC.presence_of_element_located(
+                (By.ID, "service")
+            )
+        )
+
+        self.wait.until(
+            lambda d: len(Select(service).options) > 1
+        )
+
+        Select(service).select_by_value("187")
+
+        self.add_log("Professional Tax Selected")
+
+    # ============================================================
+    # HANDLE POPUP
+    # ============================================================
+
+    def handle_popup(self):
+
+        # ============================================================
+        # CLICK CONTINUE + HANDLE POPUP
+        # ============================================================
+
+        main_window = self.driver.current_window_handle
+
+        continue_btn = self.wait.until(
+            EC.element_to_be_clickable((By.ID, "continuebtn"))
+        )
+
+        # Store old windows
+        old_windows = self.driver.window_handles
+
+        # Click using JS
+        self.driver.execute_script(
+            "arguments[0].click();",
+            continue_btn
+        )
+
+        popup_url = None
+
+        # ============================================================
+        # WAIT FOR POPUP WINDOW
+        # ============================================================
+
+        try:
+
+            self.wait.until(
+                lambda d: len(d.window_handles) > len(old_windows)
+            )
+
+            new_windows = self.driver.window_handles
+
+            for window in new_windows:
+
+                if window not in old_windows:
+
+                    # Switch popup
+                    self.driver.switch_to.window(window)
+
+                    # Wait fully loaded
+                    self.wait.until(
+                        lambda d: d.execute_script(
+                            "return document.readyState"
+                        ) == "complete"
+                    )
+
+                    time.sleep(2)
+
+                    popup_url = self.driver.current_url
+
+                    self.add_log(f"Popup URL : {popup_url}")
+
+                    # Close popup
+                    self.driver.close()
+
+                    # Back to main window
+                    self.driver.switch_to.window(main_window)
+
+                    break
+
+        except Exception as e:
+
+            self.add_log(f"Popup not opened : {e}")
+
+        # ============================================================
+        # FALLBACK METHOD
+        # ============================================================
+
+        if not popup_url:
+
+            try:
+
+                html = self.driver.page_source
+
+                match = re.search(
+                    r"window\.open\(['\"]([^'\"]+)['\"]",
+                    html
+                )
+
+                if match:
+
+                    popup_url = (
+                        "https://erp.chennaicorporation.gov.in"
+                        + match.group(1)
+                    )
+
+                    self.add_log(f"Extracted URL : {popup_url}")
+
+            except Exception as e:
+
+                self.add_log(f"Regex Failed : {e}")
+
+        # ============================================================
+        # OPEN URL IN NEW TAB
+        # ============================================================
+
+        if popup_url:
+
+            # Create new tab
+            self.driver.switch_to.new_window('tab')
+
+            # Open popup URL
+            self.driver.get(popup_url)
+
+            # Wait page load
+            self.wait.until(
+                lambda d: d.execute_script(
+                    "return document.readyState"
+                ) == "complete"
+            )
+
+            # Reset iframe
+            self.driver.switch_to.default_content()
+
+            # Wait body load
+            self.wait.until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+
+            self.add_log(f"Final URL : {self.driver.current_url}")
+            self.add_log(f"Final Title : {self.driver.title}")
+
+        else:
+
+            raise Exception("Popup URL Not Found")
+
+    
+    # ============================================================
+    # FILL BASIC DETAILS
+    # ============================================================
+
+    def fill_basic_details(self):
+
+        self.wait.until(EC.presence_of_element_located((By.ID, "assesseeName"))).send_keys(self.data["comp_name"])
+
+        # ========================================================
+        # CATEGORY TYPE
+        # ========================================================
+
+        category_type = self.wait.until(EC.presence_of_element_located((By.ID, "categoryType")))
+
+        Select(category_type).select_by_value(self.data["category_type"])
+
+        # ========================================================
+        # CATEGORY SUB TYPE
+        # ========================================================
+
+        category_sub = self.wait.until(EC.presence_of_element_located((By.ID, "categorySelect")))
+        self.wait.until(lambda d: len(Select(category_sub).options) > 1)
+
+        Select(category_sub).select_by_value(self.data["category_sub_type"])
+
+        self.add_log("Basic Details Filled")
+        self.set_progress(45)
+
+    # ============================================================
+    # PROPERTY DETAILS
+    # ============================================================
+
+    def fill_property_details(self):
+
+        # ========================================================
+        # PROPERTY TAX NUMBER
+        # ========================================================
+
+        if self.data["property_tax_number"] != "0":
+
+            property_input = self.wait.until(EC.presence_of_element_located((By.ID, "propertyTaxNumber")))
+
+            property_input.send_keys(self.data["property_tax_number"])
+            property_input.send_keys(Keys.TAB)
+
+            self.add_log("Property Tax Number Entered")
+            self.set_progress(55)
+        # ========================================================
+        # MANUAL ADDRESS
+        # ========================================================
+
+        else:
+            if self.data["buildingName"] != "":
+                building_name = self.wait.until(EC.presence_of_element_located((By.ID, "buildingName")))
+                building_name.send_keys(self.data["buildingName"])
+                
+            self.add_log("Address Fetching it")
+            self.set_progress(55)
+
+            self.wait.until(EC.presence_of_element_located((By.ID, "buildingNo"))).send_keys(self.data["door_no"])
+
+            # ====================================================
+            # ZONE
+            # ====================================================
+
+            zone = Select(self.wait.until(EC.presence_of_element_located((By.ID, "zoneId"))))
+            
+            # zone.select_by_value(self.data["zone"])
+            zone.select_by_visible_text(self.data["zone"])
+
+            # ====================================================
+            # WARD
+            # ====================================================
+
+            self.wait.until(lambda d: len(Select(d.find_element(By.ID, "wardId")).options) > 1)
+
+            ward = Select(self.wait.until(EC.presence_of_element_located((By.ID, "wardId"))))
+
+            # ward.select_by_value(self.data["ward_or_division"])
+            ward.select_by_visible_text(self.data["ward_or_division"])
+
+            # ====================================================
+            # AREA
+            # ====================================================
+
+            self.wait.until(lambda d: len(Select(d.find_element(By.ID, "areaId")).options) > 1)
+
+            area = Select(self.wait.until(EC.presence_of_element_located((By.ID, "areaId"))))
+
+            # area.select_by_value(self.data["area"])
+            area.select_by_visible_text(self.data["area"])
+
+            # ====================================================
+            # LOCATION
+            # ====================================================
+
+            self.wait.until(lambda d: len(Select(d.find_element(By.ID, "locationId")).options) > 1)
+
+            location = Select(self.wait.until(EC.presence_of_element_located((By.ID, "locationId"))))
+            # location.select_by_value(self.data["locality"])
+            location.select_by_visible_text(self.data["locality"])
+
+            # ====================================================
+            # STREET
+            # ====================================================
+
+            self.wait.until(lambda d: len(Select(d.find_element(By.ID, "streetId")).options) > 1)
+
+            street = Select(self.wait.until(EC.presence_of_element_located((By.ID, "streetId"))))
+
+            # street.select_by_value(self.data["street"])
+            street.select_by_visible_text(self.data["street"])
+            
+            # ====================================================
+            # PINCODE
+            # ====================================================
+
+            pin = self.wait.until(EC.presence_of_element_located((By.ID, "pinCode")))
+
+            pin.clear()
+
+            pin.send_keys(self.data["pincode"])
+
+            self.add_log("Manual Property Details Filled")
+
+        time.sleep(5)
+
+    # ============================================================
+    # CONTACT DETAILS
+    # ============================================================
+
+    def fill_contact_details(self):
+
+        self.wait.until(EC.presence_of_element_located((By.ID, "remitterName"))).send_keys(self.data["authorized_person"])
+
+        self.wait.until(EC.presence_of_element_located((By.ID, "remitterMobileNo"))).send_keys(self.data["authorized_mobile_number"])
+
+        self.add_log("Contact Details Filled")
+
+    # ============================================================
+    # DIRECTOR / EMPLOYEE TABLE
+    # ============================================================
+
+    def fill_director_employee_table(self):
+
+        grid = self.data["details_dir_emp"]
+
+        table = self.wait.until(EC.presence_of_element_located((By.XPATH,"(//table//table//table//table)[2]")))
+
+        rows = table.find_elements(By.XPATH, ".//tr")
+
+        rows = rows[1:]
+
+        row_index = 0
+
+        self.add_log("Director and Employee Details Fetching")
+        self.set_progress(75)
+        
+        for row in rows:
+
+            cols = row.find_elements(By.XPATH, "./td")
+
+            if len(cols) >= 5 and row_index < len(grid["rows"]):
+
+                row_data = grid["rows"][row_index]
+
+                # =================================================
+                # DIRECTORS
+                # =================================================
+
+                try:
+
+                    director_input = cols[3].find_element(By.XPATH,".//input")
+
+                    self.driver.execute_script("arguments[0].scrollIntoView();",director_input)
+
+                    director_input.clear()
+
+                    director_input.send_keys(str(row_data["directors"]))
+
+                except Exception as e:
+
+                    self.add_log(f"Director Input Error : {e}")
+
+                # =================================================
+                # EMPLOYEES
+                # =================================================
+
+                try:
+
+                    employee_input = cols[4].find_element(By.XPATH,".//input")
+
+                    employee_input.clear()
+
+                    employee_input.send_keys(str(row_data["employees"]))
+
+                except Exception as e:
+
+                    self.add_log(f"Employee Input Error : {e}")
+
+                row_index += 1
+
+        self.add_log("Director / Employee Table Filled")
+
+    # ============================================================
+    # FINANCIAL DETAILS
+    # ============================================================
+
+    def fill_financial_details(self):
+        
+        self.wait.until(EC.presence_of_element_located((By.ID, "halfYearlyGrossIncome"))).send_keys(str(self.data.get("half_yearly_gross_income") or "0"))
+        
+        self.wait.until(EC.presence_of_element_located((By.ID, "commdate"))).send_keys(self.data["Date_of_commencement"])
+
+        # If remarks is missing/None/blank, this is a fresh filing —
+        # default it to "New Registration" instead of sending an empty value.
+        remarks_value = self.data.get("remarks") or "New Registration"
+        self.wait.until(EC.presence_of_element_located((By.ID, "remarks"))).send_keys(remarks_value)
+
+        self.add_log("Financial Details Filled")
+
+    # ============================================================
+    # SUBMIT FORM
+    # ============================================================
+
+    def submit_form(self):
+
+        self.wait.until(EC.element_to_be_clickable((By.XPATH,"//input[@type='submit' or @value='Submit']"))).click()
+        time.sleep(2)
+        self.wait.until(EC.element_to_be_clickable((By.XPATH,"//input[@type='submit' or @value='Submit']"))).click()
+        self.add_log("Submit the form page")
+        self.set_progress(93)
+        time.sleep(5)
+        ptnan = self.wait.until(EC.presence_of_element_located((By.XPATH,"//td[contains(text(),'PTNAN:')]/following-sibling::td/span"))).text
+        self.add_log(f"PT Number : {ptnan}")
+        self.add_log("Get the Professional Number")
+        self.set_progress(95)
+        # Result now flows back through run()'s return value — the
+        # framework (AutomationFramework._run_in_background) is what
+        # writes it onto the session via set_result(), not this class.
+        return f"Professional Tax - {ptnan}"
+
+    # ============================================================
+    # MAIN EXECUTION
+    # ============================================================
+
+    def run(self):
+
+        try:
+            time.sleep(2)
+            self.add_log("Page Configuration")
+            self.set_progress(5)
+            self.setup_driver()
+            time.sleep(2)
+            self.add_log("Page Login Started")
+            self.set_progress(10)
+            self.login()
+            time.sleep(2)
+            self.add_log("Create service request")
+            self.set_progress(15)
+            self.create_service_request()
+            time.sleep(2)
+            self.add_log("Select service")
+            self.set_progress(20)
+            self.select_service()
+            time.sleep(2)
+            self.add_log("Starting the filings")
+            self.set_progress(30)
+            self.handle_popup()
+            time.sleep(2)
+            self.add_log("filling basic details")
+            self.set_progress(40)
+            self.fill_basic_details()
+            time.sleep(2)
+            self.add_log("filling property details")
+            self.set_progress(50)
+            self.fill_property_details()
+            time.sleep(2)
+            self.add_log("filling contact details")
+            self.set_progress(60)
+            self.fill_contact_details()
+            time.sleep(2)
+            self.add_log("filling director employee table")
+            self.set_progress(70)
+            self.fill_director_employee_table()
+            time.sleep(2)
+            self.add_log("filling financial details")
+            self.set_progress(80)
+            self.fill_financial_details()
+            time.sleep(2)
+            self.add_log("Filings Submitting")
+            self.set_progress(90)          
+            result = self.submit_form()
+            time.sleep(2)
+            self.add_log("Successsfully closed")
+            self.set_progress(100)
+            self.driver.quit()
+
+            return result
+
+        except Exception as e:
+            self.add_log(f"Error: {e}")
+
+            if self.driver:
+                self.driver.quit()
+
+            return {
+                "Status": "500",
+                "Message": f"Error - {str(e)}"
+            }
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+if __name__ == "__main__":
+
+    data1 = {"rows":[{"directors":1,"employees":0},{"directors":0,"employees":1},{"directors":1,"employees":0},{"directors":0,"employees":1},{"directors":1,"employees":0},{"directors":0,"employees":1}]}
+
+    data = {"username":"josephdy","password":"Vignesh@123","comp_name":"IndiaFilings","categoryType":"2","categorySelect":"8","propertyTaxNumber":"0","auth_name":"ABDUR RAHIM","auth_mobile_no":"7418306307","details_dir_emp":data1,"doi":"25/11/2025","halfYearlyGrossIncome":"0","remarks":"New Regr","doorno":"10","zoneId":"N05","wardId":"N059","areaId":"Anna Salai","locationId":"Anna Salai","streetId":"ANNA SALAI","pincode":"55555"}
+
+    obj = Chennai_Professional_Tax(data)
+
+    result = obj.run()
+
+    print(result)
