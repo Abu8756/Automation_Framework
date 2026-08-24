@@ -1147,12 +1147,12 @@ _EPFO_MEMBER_SCHEMA = {
         "pattern_message": "member 'qualification' must be a single numeric digit",
     },
     "pan": {
-        "type": str, "required": True,
+        "type": str, "required": False,
         "pattern": _PAN_RE,
         "pattern_message": "member 'pan' must be a valid PAN (e.g. ABCDE1234F)",
     },
     "email": {
-        "type": str, "required": True,
+        "type": str, "required": False,
         "pattern": _EMAIL_RE,
         "pattern_message": "member 'email' must be a valid email address (e.g. name@domain.com)",
     },
