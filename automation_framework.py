@@ -1176,7 +1176,7 @@ class EPFOService(AutomationService):
         from epfo import EPFOOnboarding
 
         self.add_log("Launching EPFO PF member onboarding automation")
-        obj = EPFOOnboarding(data=data, session_id=self.session_id, sessions=self.framework.sessions)
+        obj = EPFOOnboarding(data=data, session=self.framework.sessions.get(self.session_id))
         return obj.run()
 
 
