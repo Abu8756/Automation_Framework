@@ -1233,9 +1233,6 @@ _EPFO_MEMBER_SCHEMA = {
         "type": str, "required": True,
         "pattern": _DATE_DDMMYYYY_RE,
         "pattern_message": "member 'doj' must be in DD/MM/YYYY format",
-        "date_format": "%d/%m/%Y",
-        "date_range": "past",  # today or earlier only — no future joining dates
-        "date_range_message": "member 'doj' cannot be a future date; it must be today or earlier",
     },
     "wages": {
         "type": str, "required": True,
