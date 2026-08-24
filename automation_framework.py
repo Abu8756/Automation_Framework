@@ -14,6 +14,101 @@ def _now() -> str:
 
 
 # ============================================================
+# DATE RANGE HELPERS
+# ============================================================
+# Lets a schema field require a date to fall in some range relative to
+# "today", instead of just matching a regex format. Used via the
+# `date_range` rule in Validator.validate(), e.g.:
+#
+#   "dob": {"pattern": DATE_RE, "date_format": "%d/%m/%Y", "date_range": "past"}
+#   "doj": {"pattern": DATE_RE, "date_format": "%d/%m/%Y",
+#            "date_range": {"min": {"days": -3}, "max": "today"}}
+#   "incorporation_date": {"pattern": DATE_RE,
+#            "date_range": {"min": {"months": -4}}}
+#
+# Shorthand presets (pass the string directly as `date_range`):
+#   "past"    -> value must be <= today
+#   "future"  -> value must be >= today
+#   "current" -> value must be == today
+#
+# Custom bounds (`date_range` as a dict with "min"/"max", either optional):
+#   each bound is one of:
+#     "today"                      -> today
+#     "DD/MM/YYYY" (or date_format) -> a fixed date
+#     {"days": -3}                 -> today shifted by N days (+/-)
+#     {"months": -4}               -> today shifted by N months (+/-)
+#     {"years": -1}                -> today shifted by N years (+/-)
+
+DATE_RANGE_PRESETS = {
+    "past": {"max": "today"},
+    "future": {"min": "today"},
+    "current": {"min": "today", "max": "today"},
+}
+
+
+def _shift_date(base: datetime.date, days=None, months=None, years=None) -> datetime.date:
+    d = base
+    if years:
+        try:
+            d = d.replace(year=d.year + years)
+        except ValueError:
+            d = d.replace(year=d.year + years, day=28)
+    if months:
+        month_index = d.month - 1 + months
+        year = d.year + month_index // 12
+        month = month_index % 12 + 1
+        last_day = [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28,
+                    31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
+        d = d.replace(year=year, month=month, day=min(d.day, last_day))
+    if days:
+        d = d + datetime.timedelta(days=days)
+    return d
+
+
+def _resolve_date_bound(bound, today: datetime.date, date_format: str):
+    """Turn a date_range min/max entry into a concrete date, or None."""
+    if bound is None:
+        return None
+    if bound == "today":
+        return today
+    if isinstance(bound, str):
+        return datetime.datetime.strptime(bound, date_format).date()
+    if isinstance(bound, dict):
+        return _shift_date(today, days=bound.get("days"), months=bound.get("months"), years=bound.get("years"))
+    raise ValueError(f"Unsupported date_range bound: {bound!r}")
+
+
+def check_date_range(value_str: str, rules: dict, full_name: str):
+    """Returns an error message string if value_str violates rules['date_range'], else None."""
+    date_range = rules.get("date_range")
+    if not date_range:
+        return None
+
+    date_format = rules.get("date_format", "%d/%m/%Y")
+    try:
+        value_date = datetime.datetime.strptime(value_str, date_format).date()
+    except ValueError:
+        return rules.get("date_range_message", f"'{full_name}' is not a valid date")
+
+    spec = DATE_RANGE_PRESETS[date_range] if isinstance(date_range, str) else date_range
+    today = datetime.date.today()
+    min_bound = _resolve_date_bound(spec.get("min"), today, date_format)
+    max_bound = _resolve_date_bound(spec.get("max"), today, date_format)
+
+    if min_bound and value_date < min_bound:
+        return rules.get(
+            "date_range_message",
+            f"'{full_name}' must be on or after {min_bound.strftime(date_format)}",
+        )
+    if max_bound and value_date > max_bound:
+        return rules.get(
+            "date_range_message",
+            f"'{full_name}' must be on or before {max_bound.strftime(date_format)}",
+        )
+    return None
+
+
+# ============================================================
 # CENTRALIZED / REUSABLE JSON OPTIONS HELPERS
 # ============================================================
 
@@ -248,6 +343,14 @@ class AutomationFramework:
                     message = rules.get("pattern_message", f"'{full_name}' has an invalid format")
                     errors.append(message)
                     continue
+
+            # -------- date range check (past / future / current / relative offsets) --------
+            if "date_range" in rules and isinstance(value, str):
+                date_range_error = check_date_range(value, rules, full_name)
+                if date_range_error:
+                    errors.append(date_range_error)
+                    continue
+
             choices = rules.get("choices")
             choices_map = rules.get("choices_map")
             depends_on = rules.get("depends_on")
