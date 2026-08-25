@@ -310,7 +310,7 @@ class UdyamRegistration:
             try:
                 otp_error = self.driver.find_element(By.ID,"ctl00_ContentPlaceHolder1_lblOtp1")
             except:
-                otp_error="Correct OTP"
+                otp_error=None
             if "Incorrect OTP" in otp_error.text:
                 self.service.add_log("Incorrect OTP So after 5 Minutes Retry it. Automation Closed")
                 raise "Incorrect OTP So after 5 Minutes Retry it. Automation Closed"
