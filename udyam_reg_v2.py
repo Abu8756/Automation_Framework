@@ -775,18 +775,21 @@ class UdyamRegistration:
             time.sleep(5)
     
             # 🔹 Select NIC 2 Digit
+            print("NIC 1 ---> ",self.data["nic"]["nic2"])
             nic2 = Select(self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl2NicCode"))))
             nic2.select_by_value(self.data["nic"]["nic2"])
             self.wait_loader_loop()
             time.sleep(2)
     
             # 🔹 Select NIC 4 Digit
+            print("NIC 4 ---> ",self.data["nic"]["nic4"])
             nic4 = Select(self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl4NicCode"))))
             nic4.select_by_value(self.data["nic"]["nic4"])
             self.wait_loader_loop()
             time.sleep(2)
     
             # 🔹 Select NIC 5 Digit
+            print("NIC 5 ---> ",self.data["nic"]["nic5"])
             nic5 = Select(self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl5NicCode"))))
             nic5.select_by_value(self.data["nic"]["nic5"])
             self.wait_loader_loop()
