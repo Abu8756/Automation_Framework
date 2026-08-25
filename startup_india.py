@@ -1665,6 +1665,7 @@ class Startup_india:
                 self.service.add_log(str(SessionStatus.COMPLETED))
                 self.service.set_progress(100)
                 self.service.add_log(str("Successfully Completed"))
+                input("Quit:--> Enter Press to Quit")
                 driver.quit()
                 
                 result = {"status":200,"message":"Success completed","timestamp":datetime.datetime.now().isoformat(),"file_reponse":file}
@@ -1692,6 +1693,7 @@ class Startup_india:
             # the driver may already be closed (wait_for_otp /
             # wait_for_multi_otp quit it themselves on an OTP timeout) —
             # quitting again should never raise and mask the real error.
+            input("Quit:--> Enter Press to Quit")
             if driver is not None:
                 try:
                     driver.quit()
@@ -1707,7 +1709,6 @@ class Startup_india:
             }
             self.service.set_result(error_result)
             return error_result
-    
     def run(self):
         try:
             #print("Startthe run")
