@@ -772,7 +772,7 @@ class UdyamRegistration:
             # NIC 2 Digit Code, NIC 4 Digit Code, NIC 5 Digit Code                                                    #
             #                                                                                                         #
             #---------------------------------------------------------------------------------------------------------#
-    
+            time.sleep(5)
     
             # 🔹 Select NIC 2 Digit
             nic2 = Select(self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl2NicCode"))))
