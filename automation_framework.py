@@ -1003,9 +1003,13 @@ class UdyamRegService(AutomationService):
         from udyam_reg_v2 import UdyamRegistration
 
         self.add_log("Launching Udyam automation")
-        obj = UdyamRegistration(data=data, session=self.framework.sessions.get(self.session_id))
-        obj.logger = self  # self.add_log(message) / self.set_progress(n) both match what obj already calls
-        return obj.udyam_reg_v2()
+        # Pass this AutomationService instance itself (not a raw session_id/
+        # sessions dict) — UdyamRegistration has no session, logging, or OTP
+        # storage of its own; it calls back into this service for all of
+        # that, so the framework is the single source of truth (same pattern
+        # as StartupIndiaService above).
+        obj = UdyamRegistration(data=data, service=self)
+        return obj.run()
 
 _DIR_EMP_ROW_SCHEMA = {
     "directors": {"type": int, "required": True},

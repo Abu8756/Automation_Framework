@@ -57,19 +57,11 @@ import time
 import base64
 import os
 import json
-import logging
-import colorlog
+import datetime
 import cv2
 import easyocr
 import numpy as np
 
-log = colorlog.getLogger()
-log.handlers.clear()
-handler = colorlog.StreamHandler()
-formatter = colorlog.ColoredFormatter("%(log_color)s%(asctime)s | %(levelname)s | %(name)s | %(message)s")
-handler.setFormatter(formatter)
-log.addHandler(handler)
-log.setLevel(logging.INFO)
 # Folder setup
 captcha_folder = "UDYAM_CAPTCHA"
 os.makedirs(captcha_folder, exist_ok=True)
@@ -80,11 +72,10 @@ os.makedirs(captcha_folder, exist_ok=True)
 
 class UdyamRegistration_captcha:
 
-    def __init__(self, driver, wait, data=None, session=None):
+    def __init__(self, driver, wait, data=None):
         self.driver = driver
         self.wait = wait
         self.data = data
-        self.session = session
         self.reader = easyocr.Reader(["en"], gpu=False)
 
     def get_captcha_base64(self):
@@ -134,54 +125,18 @@ class UdyamRegistration_captcha:
 
 class UdyamRegistration:
 
-    def __init__(self,data,session=None):
+    def __init__(self, data, service):
+        self.data = data
+        # `service` is the UdyamRegService (AutomationService) instance that
+        # created this run. It is the ONLY place session state, progress,
+        # logging, error/result storage, and OTP storage live — this class
+        # holds none of that itself, it just calls back into the framework
+        # through this object (same pattern as Startup_india in
+        # startup_india.py).
+        self.service = service
+        self.session_id = service.session_id  # read-only, handy for log text
+        self.driver = None
 
-        self.data=data
-        self.session=session
-        self.logger=None
-
-    def add_log(self,msg):
-
-        if self.logger:
-            self.logger.add_log(msg)
-
-        print(msg)
-
-    def set_progress(self,value):
-
-        if self.logger and hasattr(self.logger, "set_progress"):
-            self.logger.set_progress(value)
-
-    def wait_for_otp(self,timeout=3000):
-
-        start=time.time()
-
-        self.add_log(
-            "Waiting for OTP"
-        )
-
-        while True:
-
-            if time.time()-start>timeout:
-                raise Exception(
-                    "OTP timeout"
-                )
-
-            if self.session["otp_received"]:
-
-                otp=self.session["otp"]
-
-                self.session["otp"]=None
-                self.session["otp_received"]=False
-
-                self.add_log(
-                    "OTP received"
-                )
-
-                return otp
-
-            time.sleep(1)
-            
     def handle_alert(self):
     
         try:
@@ -202,7 +157,7 @@ class UdyamRegistration:
     
     def wait_loader_loop(self, timeout=90):
     
-        log.critical("Waiting for loader to disappear")
+        self.service.add_log("Waiting for loader to disappear")
         start_time = time.time()
         time.sleep(1)
     
@@ -211,15 +166,15 @@ class UdyamRegistration:
                 loader = self.driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_UpdateProgress4")
     
                 if not loader.is_displayed():
-                    log.warning("Loader disappeared")
+                    self.service.add_log("Loader disappeared")
                     return True
     
             except:
-                log.warning("Loader not found")
+                self.service.add_log("Loader not found")
                 return True
     
             if time.time() - start_time > timeout:
-                log.error("Loader timeout")
+                self.service.add_log("Loader timeout")
                 raise Exception("Loader timeout")
     
             time.sleep(0.5)
@@ -246,8 +201,8 @@ class UdyamRegistration:
     def udyam_reg_v2(self):
     
         try:
-            self.add_log("Starting Udyam Registration")
-            self.set_progress(2)
+            self.service.add_log("Starting Udyam Registration")
+            self.service.set_progress(2)
     
     
             # Configure Chrome options
@@ -263,14 +218,14 @@ class UdyamRegistration:
             self.driver = webdriver.Chrome(options=chrome_options)
 
             self.driver.get("https://udyamregistration.gov.in/")
-            self.add_log("Portal opened successfully")
+            self.service.add_log("Portal opened successfully")
     
             self.wait = WebDriverWait(self.driver, 90)
             for i in range(5):
                 try:
                     btn = self.wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "a[href='UdyamRegistration.aspx']")))
                     self.driver.execute_script("arguments[0].click();", btn)
-                    self.add_log("Site loaded & button clicked successfully")
+                    self.service.add_log("Site loaded & button clicked successfully")
                     break
     
                 except Exception as e:
@@ -286,17 +241,17 @@ class UdyamRegistration:
                         "about:blank" in current_url or
                         len(page_text) < 200   # blank/minimal DOM
                     ):
-                        log.error(f"Attempt {i+1}: Site not loaded properly (blank/error). Refreshing...")
+                        self.service.add_log(f"Attempt {i+1}: Site not loaded properly (blank/error). Refreshing...")
                     else:
-                        log.warning(f"Attempt {i+1}: Element not found. Refreshing...")
+                        self.service.add_log(f"Attempt {i+1}: Element not found. Refreshing...")
     
                 self.driver.refresh()
                 time.sleep(3)
     
-            self.add_log("Portal Loaded Successfully")
-            self.set_progress(8)
+            self.service.add_log("Portal Loaded Successfully")
+            self.service.set_progress(8)
     
-            self.add_log("Udyam Registration clicked successfully")
+            self.service.add_log("Udyam Registration clicked successfully")
     
             #--------------------------------------------------------------#
             #                                                              #  
@@ -317,7 +272,7 @@ class UdyamRegistration:
             # Click Validate & Generate OTP
             otp_btn = self.wait.until(EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_btnValidateAadhaar")))
             self.driver.execute_script("arguments[0].click();", otp_btn)
-            self.add_log("OTP sent successfully")
+            self.service.add_log("OTP sent successfully")
     
             # Wait for OTP input
             otp_input = self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtOtp1")))
@@ -327,8 +282,17 @@ class UdyamRegistration:
             time.sleep(1)
     
             # Fill OTP
-            # OTP=input("Enter OTP: ")
-            OTP=self.wait_for_otp()
+            # Wait for the Aadhaar OTP to arrive on the session. wait_for_otp()
+            # polls the session, silently discards any malformed value it sees
+            # (so a fresh one still gets a chance), and — if the timeout
+            # passes with nothing valid — quits the driver and raises
+            # OTPTimeoutError so this run fails cleanly and can be retried.
+            OTP = self.service.wait_for_otp(
+                otp_type="otp",
+                timeout=280,
+                poll_interval=2,
+                driver=self.driver,
+            )
             otp_input.clear()
             otp_input.send_keys(OTP)  # replace with real OTP
     
@@ -345,11 +309,11 @@ class UdyamRegistration:
             time.sleep(2)
             otp_error = self.driver.find_element(By.ID,"ctl00_ContentPlaceHolder1_lblOtp1")
             if "Incorrect OTP" in otp_error.text:
-                self.add_log("Incorrect OTP So after 5 Minutes Retry it. Automation Closed")
+                self.service.add_log("Incorrect OTP So after 5 Minutes Retry it. Automation Closed")
                 raise "Incorrect OTP So after 5 Minutes Retry it. Automation Closed"
 
-            self.add_log("OTP validated successfully")
-            self.set_progress(18)
+            self.service.add_log("OTP validated successfully")
+            self.service.set_progress(18)
             time.sleep(4)
     
             #--------------------------------------------------------------#
@@ -406,8 +370,8 @@ class UdyamRegistration:
     
             # 🔹 Click PAN Validate
             self.driver.execute_script("arguments[0].click();", validate_btn)
-            self.add_log("PAN validated successfully")
-            self.set_progress(28)
+            self.service.add_log("PAN validated successfully")
+            self.service.set_progress(28)
             time.sleep(2)
             self.wait_loader_loop()
             try:
@@ -439,7 +403,7 @@ class UdyamRegistration:
             continue_btn = self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_btnGetPanData")))
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", continue_btn)
             self.driver.execute_script("arguments[0].click();", continue_btn)
-            self.add_log("Continue button clicked successfully")
+            self.service.add_log("Continue button clicked successfully")
             time.sleep(4)
     
             #--------------------------------------------------------------#
@@ -456,7 +420,7 @@ class UdyamRegistration:
             # 🔹 Click "No" radio button (value=2)
             gst_no = self.wait.until(EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_rblWhetherGstn_1")))
             self.driver.execute_script("arguments[0].click();", gst_no)
-            self.add_log("GSTIN radio button clicked successfully")
+            self.service.add_log("GSTIN radio button clicked successfully")
             time.sleep(1)
     
     
@@ -472,7 +436,7 @@ class UdyamRegistration:
             inv_section = self.wait.until(EC.presence_of_element_located((By.XPATH, "//b[contains(text(),'Written Down Value')]")))
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inv_section)
             time.sleep(2)
-            self.add_log("Investment section scrolled to successfully")
+            self.service.add_log("Investment section scrolled to successfully")
     
             # 🔹 Fill Written Down Value (A)
             wdv_input = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtDepCost")))
@@ -500,8 +464,8 @@ class UdyamRegistration:
             continue_btn = self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_btnEnterprisedetail")))
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", continue_btn)
             self.driver.execute_script("arguments[0].click();", continue_btn)
-            self.add_log("Enterprise Details filled successfully")
-            self.set_progress(38)
+            self.service.add_log("Enterprise Details filled successfully")
+            self.service.set_progress(38)
     
     
             #----------------------------------------------------#
@@ -555,7 +519,7 @@ class UdyamRegistration:
                 if opt.get_attribute("value") == str(self.data["divyang"]):
                     self.driver.execute_script("arguments[0].click();", opt)
                     break
-            self.add_log("Basic Details filled successfully")
+            self.service.add_log("Basic Details filled successfully")
             
     
             #------------------------------------#
@@ -592,8 +556,8 @@ class UdyamRegistration:
             district_dropdown.select_by_value(self.data["official_address"]["district"])
             self.wait_loader_loop()
             time.sleep(2)
-            self.add_log("Official address filled successfully")
-            self.set_progress(48)
+            self.service.add_log("Official address filled successfully")
+            self.service.set_progress(48)
     
             #----------------------------------------------#
             #                                              #
@@ -658,8 +622,8 @@ class UdyamRegistration:
                 prev_em_section = self.wait.until(EC.presence_of_element_located((By.XPATH, "//b[contains(text(),'Previous EM-II')]")))
                 self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", prev_em_section)
             time.sleep(2)
-            self.add_log("Location of Plant(s)/Unit(s) filled successfully")
-            self.set_progress(58)
+            self.service.add_log("Location of Plant(s)/Unit(s) filled successfully")
+            self.service.set_progress(58)
     
             #--------------------------------------------------------------------#
             #                                                                    #
@@ -680,7 +644,7 @@ class UdyamRegistration:
             inc_section = self.wait.until(EC.presence_of_element_located((By.XPATH, "(//b[contains(text(),'Date of Incorporation')])[2]")))
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inc_section)
             time.sleep(2)
-            self.add_log("Previous EM-II/UAM Registration Number filled successfully")
+            self.service.add_log("Previous EM-II/UAM Registration Number filled successfully")
     
     
             #----------------------------#
@@ -711,8 +675,8 @@ class UdyamRegistration:
                     com_date.send_keys(ch)
                     time.sleep(0.1)
             time.sleep(2)
-            self.add_log("Status of Enterprise filled successfully")
-            self.set_progress(66)
+            self.service.add_log("Status of Enterprise filled successfully")
+            self.service.set_progress(66)
             #----------------------------#
             #                            #
             # 18. Bank Details           #
@@ -741,8 +705,8 @@ class UdyamRegistration:
             acc.clear()
             acc.send_keys(self.data["account_number"])
             time.sleep(2)
-            self.add_log("Bank Details filled successfully")
-            self.set_progress(74)
+            self.service.add_log("Bank Details filled successfully")
+            self.service.set_progress(74)
     
     
             #----------------------------------#
@@ -771,7 +735,7 @@ class UdyamRegistration:
             multi_section = self.wait.until(EC.presence_of_element_located((By.XPATH, "//table[@id='ctl00_ContentPlaceHolder1_rdbCatggMultiple']")))
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", multi_section)
             time.sleep(2)
-            self.add_log("Major Activity filled successfully")
+            self.service.add_log("Major Activity filled successfully")
 
             if self.data["major_activity"] == "2" or self.data["major_activity"] == 2:
                 time.sleep(5)
@@ -798,7 +762,7 @@ class UdyamRegistration:
             nic_section = self.wait.until(EC.presence_of_element_located((By.XPATH, "//b[contains(text(),'NIC 2 Digit Code')]")))
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic_section)
             time.sleep(5)
-            self.add_log("NIC section loaded successfully")
+            self.service.add_log("NIC section loaded successfully")
     
             #---------------------------------------------------------------------------------------------------------#
             #                                                                                                         #
@@ -829,8 +793,8 @@ class UdyamRegistration:
             add_btn = self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_btnAddMore")))
             self.driver.execute_script("arguments[0].click();", add_btn)
             self.wait_loader_loop()
-            self.add_log("Add NIC 2,4,5 Activity Succussfully added")
-            self.set_progress(82)
+            self.service.add_log("Add NIC 2,4,5 Activity Succussfully added")
+            self.service.set_progress(82)
     
             #---------------------------------------------------------------------------------------------------------#
             #                                                                                                         #
@@ -882,24 +846,24 @@ class UdyamRegistration:
     
             # Trigger JS
             others.send_keys(Keys.TAB)
-            self.add_log("Employees filled successfully 0")
+            self.service.add_log("Employees filled successfully 0")
     
             # Wait for total auto calculation
             total = self.driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_txttotalemp")
     
             self.wait.until(lambda d: total.get_attribute("value") != "")
     
-            log.info(f"Total employees: {total.get_attribute('value')}")
+            self.service.add_log(f"Total employees: {total.get_attribute('value')}")
             time.sleep(2)
-            self.add_log("Employees filled successfully 1")
+            self.service.add_log("Employees filled successfully 1")
     
     
             # 🔹 Scroll to section (optional)
             section = self.wait.until(EC.presence_of_element_located((By.XPATH, "//b[contains(text(),'Are you interested')]")))
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", section)
             time.sleep(2)
-            self.add_log("Employees filled successfully 2")
-            self.set_progress(90)
+            self.service.add_log("Employees filled successfully 2")
+            self.service.set_progress(90)
     
             self.select_random_radio( "ctl00$ContentPlaceHolder1$rblGeM")
             time.sleep(1)
@@ -911,8 +875,8 @@ class UdyamRegistration:
             time.sleep(1)
             self.select_random_radio( "ctl00$ContentPlaceHolder1$rblsid")
             time.sleep(1)
-            self.add_log("Radio Buttons are Selected in Randomly")
-            self.set_progress(94)
+            self.service.add_log("Radio Buttons are Selected in Randomly")
+            self.service.set_progress(94)
     
             # # 🔹 Scroll to top (optional)
             # self.driver.execute_script("window.scrollTo(0, 0)")
@@ -971,7 +935,16 @@ class UdyamRegistration:
 
             while not captcha_solve:
 
-                otp_value = self.wait_for_otp()
+                # Wait for the final-submit OTP (OTP #2) to arrive on the
+                # session. Same wait_for_otp() semantics as the Aadhaar OTP
+                # above — discards malformed values, quits the driver and
+                # raises OTPTimeoutError on a real timeout.
+                otp_value = self.service.wait_for_otp(
+                    otp_type="otp",
+                    timeout=280,
+                    poll_interval=2,
+                    driver=self.driver,
+                )
 
                 otp_input = self.wait.until(
                     EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtOtp"))
@@ -1067,7 +1040,7 @@ class UdyamRegistration:
             match = re.search(r"UDYAM-[A-Z]{2}-\d+", alert.text)
             if match:
                 print("Registration Number:", match.group())
-                self.add_log(f"Registration Number: {match.group()}")
+                self.service.add_log(f"Registration Number: {match.group()}")
 
             # Click OK on second alert
             alert.accept()            
@@ -1080,18 +1053,70 @@ class UdyamRegistration:
             # Success
             # ---------------------------------------
 
+            self.service.set_progress(100)
+            self.service.add_log("Udyam Registration Completed Successfully")
+
             self.driver.quit()
-            self.add_log("Browser closed successfully")
-            return {"Udyam_No":udyam_no}
+            self.service.add_log("Browser closed successfully")
+
+            result = {
+                "status": 200,
+                "message": "Success completed",
+                "timestamp": datetime.datetime.now().isoformat(),
+                "Udyam_No": udyam_no,
+            }
+            self.service.set_result(result)
+            return result
 
         except Exception as e:
-            log.error(f"Error: {e}")
-            self.add_log(f"Automation failed: {e}")
+            self.service.set_progress(100)
+            self.service.add_log(f"Automation failed: {e}")
+            self.service.set_error(str(e))
 
-            try:
-                self.driver.quit()
-                self.add_log("Browser closed after error")
-            except Exception:
-                pass 
+            # Grab a screenshot of whatever the browser is showing at the
+            # moment of failure — this has to happen BEFORE driver.quit(),
+            # since a quit driver can no longer be screenshotted. If the
+            # driver never even got created, there's nothing to shoot.
+            screenshot_base64 = None
+            if self.driver is not None:
+                try:
+                    screenshot_base64 = self.driver.get_screenshot_as_base64()
+                    self.service.add_log("Captured error screenshot")
+                except Exception as screenshot_error:
+                    self.service.add_log(f"Could not capture error screenshot: {screenshot_error}")
+
+            # Quit only after the screenshot attempt above. Guarded because
+            # the driver may already be closed (self.service.wait_for_otp()
+            # quits it itself on an OTP timeout) — quitting again should
+            # never raise and mask the real error.
+            if self.driver is not None:
+                try:
+                    self.driver.quit()
+                    self.service.add_log("Browser closed after error")
+                except Exception:
+                    pass
+
+            error_result = {
+                "status": 500,
+                "message": "Automation failed",
+                "error": str(e),
+                "timestamp": datetime.datetime.now().isoformat(),
+                "screenshot_base64": screenshot_base64,
+            }
+            self.service.set_result(error_result)
+            return error_result
+
+    def run(self):
+        try:
+            return self.udyam_reg_v2()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            # udyam_reg_v2() now catches its own exceptions (captures a
+            # screenshot, quits the driver, calls set_error/set_result, and
+            # returns an error dict instead of raising) — this branch is a
+            # last-resort safety net for anything that manages to escape
+            # that handling anyway. Re-raise here so the Flask worker thread
+            # in automation_framework.py still records the failure via
+            # set_error() instead of it vanishing silently.
             raise
-        
