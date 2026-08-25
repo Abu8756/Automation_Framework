@@ -352,6 +352,7 @@ class Startup_india:
             return False
 
     def startup_india(self):
+        driver = None
         try:
             #print("Chrome Started")
             self.download_dir = os.path.join(Startup_india_path,str(self.session_id))
@@ -1673,19 +1674,39 @@ class Startup_india:
             self.service.set_progress(100)
             self.service.add_log(str(SessionStatus.FAILED) + ": " + str(f"Program Error : {str(e)}"))
             self.service.set_error(str(e))
-            # Driver may already be closed (wait_for_otp / wait_for_multi_otp
-            # quit it themselves on an OTP timeout) — quitting again should
-            # never raise and mask the real error above, so guard it.
-            try:
-                driver.quit()
-            except Exception:
-                pass
-            # Re-raise so the caller (Flask route) sees the failure and the
-            # session status reads FAILED with a real error message, instead
-            # of the run silently returning None on any error, including an
-            # OTPTimeoutError — that error should reach the API/caller so a
-            # retry can be triggered.
-            raise
+
+            # Grab a screenshot of whatever the browser is showing at the
+            # moment of failure — this has to happen BEFORE driver.quit(),
+            # since a quit driver can no longer be screenshotted. If the
+            # driver never even got created (e.g. the failure happened
+            # before webdriver.Chrome(...) ran), there's nothing to shoot.
+            screenshot_base64 = None
+            if driver is not None:
+                try:
+                    screenshot_base64 = driver.get_screenshot_as_base64()
+                    self.service.add_log("Captured error screenshot")
+                except Exception as screenshot_error:
+                    self.service.add_log(f"Could not capture error screenshot: {screenshot_error}")
+
+            # Quit only after the screenshot attempt above. Guarded because
+            # the driver may already be closed (wait_for_otp /
+            # wait_for_multi_otp quit it themselves on an OTP timeout) —
+            # quitting again should never raise and mask the real error.
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
+            error_result = {
+                "status": 500,
+                "message": "Automation failed",
+                "error": str(e),
+                "timestamp": datetime.datetime.now().isoformat(),
+                "screenshot_base64": screenshot_base64,
+            }
+            self.service.set_result(error_result)
+            return error_result
     
     def run(self):
         try:
@@ -1695,11 +1716,11 @@ class Startup_india:
             import traceback
             #print("ERROR:", e)
             traceback.print_exc()
-            # Re-raise (instead of swallowing and returning None) so the
-            # Flask worker thread in automation_framework.py sees the
-            # failure and calls set_error()/records it on the session.
-            # Without this, an OTP timeout — or any other error — was
-            # invisible to /status: the session just looked like it quietly
-            # finished with an empty result, which is why "OTP not received"
-            # never surfaced anywhere the caller could see and retry on.
+            # startup_india() now catches its own exceptions (captures a
+            # screenshot, quits the driver, calls set_error/set_result, and
+            # returns an error dict instead of raising) — this branch is a
+            # last-resort safety net for anything that manages to escape
+            # that handling anyway. Re-raise here so the Flask worker
+            # thread in automation_framework.py still records the failure
+            # via set_error() instead of it vanishing silently.
             raise
