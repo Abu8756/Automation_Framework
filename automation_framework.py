@@ -287,6 +287,16 @@ class AutomationFramework:
             session = self.sessions.get(session_id)
             return bool(session and session.get(received_key))
 
+    def clear_otp(self, session_id: str, otp_type: str = "otp"):
+        """Wipe an OTP slot (value + received flag). Used to discard a bad/expired
+        value, or to consume a good one so a later retry never resubmits it."""
+        value_key, received_key = self._otp_keys(otp_type)
+        with self._lock:
+            if session_id in self.sessions:
+                self.sessions[session_id][value_key] = None
+                self.sessions[session_id][received_key] = False
+                self.sessions[session_id]["updated_at"] = _now()
+
 
     @classmethod
     def validate(cls, data, schema: dict, _path: str = ""):
@@ -619,6 +629,14 @@ class AutomationFramework:
         self.app.run(**kwargs)
 
 
+class OTPTimeoutError(Exception):
+    """Raised by wait_for_otp() when no valid OTP arrives within the given
+    timeout. Callers should catch this specifically (not a bare Exception)
+    to distinguish "OTP never arrived in time" from other automation
+    failures, so they know it's safe/expected to retry the flow."""
+    pass
+
+
 # ======================================================================
 # Base class every service extends — only run() is required
 # ======================================================================
@@ -635,16 +653,99 @@ class AutomationService:
     def set_progress(self, progress: int):
         self.framework.set_progress(self.session_id, progress)
 
-    def wait_for_otp(self, poll_interval: float = 2.0, timeout: float = 180.0):
+    def set_error(self, error: str):
+        self.framework.set_error(self.session_id, error)
+
+    def set_result(self, result):
+        self.framework.set_result(self.session_id, result)
+
+    def wait_for_otp(self, otp_type: str = "otp", timeout: float = 180.0, poll_interval: float = 2.0,
+                      pattern=None, driver=None, consume: bool = True):
+        """Session-based OTP wait, shared by every service that needs one.
+
+        - otp_type: which OTP slot to wait on ("otp", "login", "mobile", "email", ...)
+          — matches the otp_type a caller POSTs to /<service>/otp.
+        - timeout / poll_interval: how long to wait, and how often to check.
+        - pattern: compiled regex the OTP value must match; defaults to the
+          same pattern used to validate that otp_type on /<service>/otp. A
+          value that fails the pattern is discarded and waiting continues —
+          a bad value is never returned, and never counts as a timeout by
+          itself.
+        - driver: optional Selenium driver. If given, it is quit() the
+          moment this call times out, so a stuck browser never lingers.
+        - consume: clear the OTP slot once a valid value is read, so a
+          retry by the caller never resubmits a stale OTP.
+
+        Returns the validated OTP string. Raises OTPTimeoutError if nothing
+        valid arrives within `timeout` seconds.
+        """
         import time
-        self.add_log("Waiting for OTP")
+        pattern = pattern or _OTP_TYPE_PATTERNS.get(otp_type, _OTP_TYPE_PATTERNS["otp"])[0]
+        self.add_log(f"Waiting for OTP (type={otp_type}, timeout={timeout}s)")
         waited = 0.0
         while waited < timeout:
-            if self.framework.otp_received(self.session_id):
-                return self.framework.get_otp(self.session_id)
+            if self.framework.otp_received(self.session_id, otp_type=otp_type):
+                otp_value = str(self.framework.get_otp(self.session_id, otp_type=otp_type) or "").strip()
+                if otp_value and pattern.match(otp_value):
+                    if consume:
+                        self.framework.clear_otp(self.session_id, otp_type=otp_type)
+                    return otp_value
+                # Wrong shape (or empty) — discard and keep waiting for a fresh one.
+                self.framework.clear_otp(self.session_id, otp_type=otp_type)
+                self.add_log(f"Invalid OTP received for '{otp_type}', discarding and continuing to wait")
             time.sleep(poll_interval)
             waited += poll_interval
-        raise TimeoutError("OTP not received within timeout")
+
+        self.add_log(f"OTP ('{otp_type}') not received within {timeout}s timeout")
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        raise OTPTimeoutError(f"OTP ('{otp_type}') not received within {timeout} seconds")
+
+    def wait_for_multi_otp(self, otp_types, timeout: float = 180.0, poll_interval: float = 2.0,
+                            pattern=None, driver=None, consume: bool = True):
+        """Same as wait_for_otp(), but waits for several OTP slots to all
+        become valid together (e.g. a step needing a Mobile OTP and an
+        Email OTP submitted together before it can continue).
+
+        Returns {otp_type: otp_value} once every slot in `otp_types` is
+        valid. Raises OTPTimeoutError (and quits `driver`, if given) if the
+        full set isn't ready within `timeout` seconds.
+        """
+        import time
+        self.add_log(f"Waiting for OTP ({', '.join(otp_types)}, timeout={timeout}s)")
+        waited = 0.0
+        values = {t: "" for t in otp_types}
+        while waited < timeout:
+            for t in otp_types:
+                if values[t]:
+                    continue  # already validated this one on an earlier pass
+                if not self.framework.otp_received(self.session_id, otp_type=t):
+                    continue  # nothing submitted yet for this slot
+                otp_value = str(self.framework.get_otp(self.session_id, otp_type=t) or "").strip()
+                t_pattern = pattern or _OTP_TYPE_PATTERNS.get(t, _OTP_TYPE_PATTERNS["otp"])[0]
+                if otp_value and t_pattern.match(otp_value):
+                    values[t] = otp_value
+                else:
+                    self.framework.clear_otp(self.session_id, otp_type=t)
+                    self.add_log(f"Invalid OTP received for '{t}', discarding and continuing to wait")
+            if all(values.values()):
+                if consume:
+                    for t in otp_types:
+                        self.framework.clear_otp(self.session_id, otp_type=t)
+                return values
+            time.sleep(poll_interval)
+            waited += poll_interval
+
+        self.add_log(f"OTP(s) ({', '.join(otp_types)}) not received within {timeout}s timeout")
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        raise OTPTimeoutError(f"OTP(s) {otp_types} not received within {timeout} seconds")
 
     def run(self, data):
         raise NotImplementedError("Each service must implement run(self, data)")
@@ -1204,7 +1305,11 @@ class StartupIndiaService(AutomationService):
         from startup_india import Startup_india
 
         self.add_log("Launching Startup India DPIIT recognition automation")
-        obj = Startup_india(data=data, session_id=self.session_id, sessions=self.framework.sessions)
+        # Pass this AutomationService instance itself (not a raw session_id/
+        # sessions dict) — Startup_india has no session, logging, or OTP
+        # storage of its own; it calls back into this service for all of
+        # that, so the framework is the single source of truth.
+        obj = Startup_india(data=data, service=self)
         return obj.run()
 
 

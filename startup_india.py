@@ -34,7 +34,21 @@ log.setLevel(logging.INFO)
 
 Startup_india_path=r"C:\mca-filing-dev\file_dir\din_pf"
 
+
+class OTPTimeoutError(Exception):
+    """Raised when an OTP (or set of OTPs) doesn't arrive/validate within the
+    given timeout window. Caught separately from other exceptions so the
+    caller knows this specific failure means "safe to retry the run",
+    not "something in the form filling broke"."""
+    pass
+
+
 class SessionStatus:
+    """Plain string labels used inside log messages — this class holds no
+    session state of its own. All actual session storage, progress,
+    logging, error, and result tracking lives in the AutomationFramework
+    (automation_framework.py); this file never touches a session dict or
+    a log file directly — everything goes through `self.service`."""
     STARTING = "STARTING"
     LOGIN_SUCCESS = "LOGIN_SUCCESS"
     WAITING_FOR_OTP = "WAITING_FOR_OTP"
@@ -45,53 +59,19 @@ class SessionStatus:
     SUBMITTED = "SUBMITTED"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
-    
-    def __init__(self, sessions, session_id):
-        self.sessions = sessions
-        self.session_id = session_id
-
-    def update(
-        self,
-        status=None,
-        log=None,
-        progress=None,
-        error=None,
-        result=None
-    ):
-        if not self.sessions or not self.session_id:
-            return
-
-        session = self.sessions[self.session_id]
-
-        if status is not None:
-            session["status"] = status
-
-        if progress is not None:
-            session["progress"] = progress
-
-        if error is not None:
-            session["error"] = error
-
-        if result is not None:
-            session["result"] = result
-            
-        if log:
-            session.setdefault("logs", []).append({
-                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "message": log
-            })
-        session["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
 class Startup_india:
 
-    def __init__(self, data, session_id, sessions):
+    def __init__(self, data, service):
         self.data = data
-        self.session_id = session_id
-        self.sessions = sessions
+        # `service` is the StartupIndiaService (AutomationService) instance
+        # that created this run. It is the ONLY place session state,
+        # progress, logging, error/result storage, and OTP storage live —
+        # this class holds none of that itself, it just calls back into
+        # the framework through this object.
+        self.service = service
+        self.session_id = service.session_id  # read-only, handy for log text
 
-        # ADD THIS
-        self.session_manager = SessionStatus(sessions=sessions,session_id=session_id)
-        
     def download_file(self,driver):
         print("Download File section")
         try:
@@ -100,27 +80,35 @@ class Startup_india:
             while retry < max_retry:
                 try:
                     approved = WebDriverWait(driver,10).until(EC.visibility_of_element_located((By.XPATH,"//span[normalize-space()='Approved']")))
-                    self.session_manager.update(progress=93,log="Approved status visible")
+                    self.service.set_progress(93)
+                    self.service.add_log(str("Approved status visible"))
                 
                     download_buttons = driver.find_elements(By.XPATH,"//span[normalize-space()='Download']")
                     if download_buttons:
-                        self.session_manager.update(progress=94,log="Download button visible")
+                        self.service.set_progress(94)
+                        self.service.add_log(str("Download button visible"))
                         
                         download_buttons[0].click()
-                        self.session_manager.update(progress=95,log="Download started")
+                        self.service.set_progress(95)
+                        self.service.add_log(str("Download started"))
                         break
                     else:
-                        self.session_manager.update(progress=93,log="Download button not visible, refreshing page")
+                        self.service.set_progress(93)
+                        self.service.add_log(str("Download button not visible, refreshing page"))
                 except Exception as e:
-                    self.session_manager.update(progress=93,log="Waiting for elements..."+str(e))
+                    self.service.set_progress(93)
+                    self.service.add_log(str("Waiting for elements..."+str(e)))
                 retry += 1
                 driver.refresh()
                 time.sleep(5)
-            self.session_manager.update(progress=98,log="Download the Certificate with base64")
+            self.service.set_progress(98)
+            self.service.add_log(str("Download the Certificate with base64"))
             
             return self.get_file_response(driver)
         except Exception as e:
-            self.session_manager.update(progress=100,log=f"{retry} times try to download but cannot Download But Application is Submitted",error=str(e))
+            self.service.set_progress(100)
+            self.service.add_log(str(f"{retry} times try to download but cannot Download But Application is Submitted"))
+            self.service.set_error(str(e))
 
 
 
@@ -369,7 +357,8 @@ class Startup_india:
             self.download_dir = os.path.join(Startup_india_path,str(self.session_id))
             os.makedirs(self.download_dir,exist_ok=True)
             
-            self.session_manager.update(progress=3,log="Program started")
+            self.service.set_progress(3)
+            self.service.add_log(str("Program started"))
             error = None
             #print("ddta Stroing")
             data = self.data or {}
@@ -403,7 +392,8 @@ class Startup_india:
             driver.get("https://www.nsws.gov.in/portal/login")      
 
             wait = WebDriverWait(driver, 20)
-            self.session_manager.update(progress=5,log="Page opened")
+            self.service.set_progress(5)
+            self.service.add_log(str("Page opened"))
             company_name = self.data.get("business", "company").replace(" ", "_").replace("/", "_")
 
             try:
@@ -422,15 +412,19 @@ class Startup_india:
             
 
             wait.until(EC.element_to_be_clickable((By.ID, "kc-login"))).click()
-            self.session_manager.update(progress=8,log="Credentials fetched")
+            self.service.set_progress(8)
+            self.service.add_log(str("Credentials fetched"))
 
             try:
                 WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.ID, "input-error-email-login")))
-                self.session_manager.update(progress=100,log="Credentials is Wrong",error="Credentials is Wrong",status=SessionStatus.FAILED)
+                self.service.set_progress(100)
+                self.service.add_log(str(SessionStatus.FAILED) + ": " + str("Credentials is Wrong"))
+                self.service.set_error(str("Credentials is Wrong"))
                 driver.quit()
                 log.error("Login failed")
             except TimeoutException:
-                self.session_manager.update(progress=10,log="Login successful")
+                self.service.set_progress(10)
+                self.service.add_log(str("Login successful"))
 
                 attempts_left=0
                 attempts=0
@@ -438,33 +432,26 @@ class Startup_india:
 
                 while True:
                     if attempts==3:
-                        self.session_manager.update(progress=100,log="Three Attempts are Failed",status=SessionStatus.FAILED)
+                        self.service.set_progress(100)
+                        self.service.add_log(str(SessionStatus.FAILED) + ": " + str("Three Attempts are Failed"))
                         raise Exception("Three Attempts are Incorrect OTP.")
 
-                    # Wait for the Login OTP (OTP #1) to arrive on the session
-                    self.sessions[self.session_id]["status"] = SessionStatus.WAITING_FOR_OTP
-                    self.session_manager.update(log="Waiting for Login OTP")
-                    otp = ""
-                    otp_wait = 0
-                    while otp == "":
-                        otp = str(self.sessions[self.session_id].get("login_otp") or "").strip()
-                        if otp:
-                            break
-                        if otp_wait >= 280:
-                            raise Exception("Login OTP not received within timeout")
-                        time.sleep(2)
-                        otp_wait += 1
+                    # Wait for the Login OTP (OTP #1) to arrive on the session.
+                    # wait_for_otp() polls the session, silently discards any
+                    # malformed value it sees (so a fresh one still gets a
+                    # chance), and — if 280s pass with nothing valid — quits
+                    # the driver and raises OTPTimeoutError so this run fails
+                    # cleanly and can be retried instead of hanging forever.
+                    otp = self.service.wait_for_otp(
+                        otp_type="login",
+                        timeout=280,
+                        poll_interval=2,
+                        pattern=LOGIN_OTP_REGEX,
+                        driver=driver,
+                    )
 
-                    if not LOGIN_OTP_REGEX.match(otp):
-                        self.session_manager.update(log=f"Invalid Login OTP received (must be exactly 6 digits): '{otp}'")
-                        # clear the bad value so the next loop iteration waits for a fresh one
-                        self.sessions[self.session_id]["login_otp"] = None
-                        self.sessions[self.session_id]["login_otp_received"] = False
-                        attempts += 1
-                        continue
-
-                    self.sessions[self.session_id]["status"] = SessionStatus.OTP_RECEIVED
-                    self.session_manager.update(log="Login OTP received and validated")
+                    self.service.add_log(str(SessionStatus.OTP_RECEIVED))
+                    self.service.add_log(str("Login OTP received and validated"))
 
                     try:
                         error_block = WebDriverWait(driver, 3).until(EC.visibility_of_element_located((By.ID, "otp-error-block")))
@@ -496,9 +483,10 @@ class Startup_india:
                     verify_button.click()
                     time.sleep(5)
 
-                    # Consume the OTP so a retry never resubmits the same value
-                    self.sessions[self.session_id]["login_otp"] = None
-                    self.sessions[self.session_id]["login_otp_received"] = False
+                    # Consuming the OTP is already handled inside
+                    # self.service.wait_for_otp() (consume=True by default),
+                    # via the framework's clear_otp() — no local state to
+                    # clear here.
 
                     try:
                         error = WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.ID, "loginErrorMessage")))
@@ -507,7 +495,7 @@ class Startup_india:
 
                         if match:
                             attempts_left = int(match.group(1))
-                            self.session_manager.update(log=f"Incorrect Login OTP, attempts left: {attempts_left}")
+                            self.service.add_log(str(f"Incorrect Login OTP, attempts left: {attempts_left}"))
                             attempts += 1
                             continue
                     except TimeoutException:
@@ -516,17 +504,15 @@ class Startup_india:
 
                 wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, ".content-list"))).click()
                 time.sleep(20)
-                input("Stop.0")
                 WebDriverWait(driver, 300).until(EC.visibility_of_element_located((By.XPATH, "//span[text()='My Dashboard']")))
                 # WebDriverWait(driver, 300).until(EC.element_to_be_clickable((By.XPATH, "//button[normalize-space()='Apply Now']")))
                 if driver.find_elements(By.CSS_SELECTOR, ".button.action-button"):
-                    self.session_manager.update(progress=12,log="Apply button show")
-                    input("Stop")
+                    self.service.set_progress(12)
+                    self.service.add_log(str("Apply button show"))
                     btn1 = wait.until(EC.presence_of_element_located((By.XPATH, "//button[normalize-space()='Apply Now']")))
                     driver.execute_script("arguments[0].click();", btn1)
 
                     # WebDriverWait(driver, 20).until(EC.element_to_be_clickable((By.XPATH, ))).click()
-                    input("Stop1")
                     # wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".button.action-button"))).click()
                     time.sleep(10)
                     self.wait_loader(driver)
@@ -535,7 +521,9 @@ class Startup_india:
                     approved = driver.find_elements(By.XPATH,"//span[normalize-space()='Approved']")
                     if approved:
                         file = self.download_file(driver)
-                        self.session_manager.update(progress=100,log="Approved status visible",error="Already Application is Approved",status=SessionStatus.COMPLETED)
+                        self.service.set_progress(100)
+                        self.service.add_log(str(SessionStatus.COMPLETED) + ": " + str("Approved status visible"))
+                        self.service.set_error(str("Already Application is Approved"))
                         # result_code=self.base64_file(driver) 
                         driver.quit()         
                                     
@@ -592,12 +580,14 @@ class Startup_india:
                         # driver.refresh()
                         time.sleep(10)
                         wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".button.action-button"))).click()
-                        self.session_manager.update(progress=15,log="Apply button clicked")
+                        self.service.set_progress(15)
+                        self.service.add_log(str("Apply button clicked"))
                 print("Add Before")
                 apply_buttons = driver.find_elements(By.CSS_SELECTOR, ".button.action-button")
                 print("Add After")
                 print(driver.get_cookies())
-                self.session_manager.update(progress=18,log="Start Page started")
+                self.service.set_progress(18)
+                self.service.add_log(str("Start Page started"))
                 selector = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "div.document-type-control .ant-select-selector")))
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", selector)
                 selector.click()
@@ -702,8 +692,10 @@ class Startup_india:
                 # Click
                 element.click()
                 time.sleep(2)
-                self.session_manager.update(progress=20,log="Start Up Profile Complete")
-                self.session_manager.update(progress=22,log="Entity Details Started")
+                self.service.set_progress(20)
+                self.service.add_log(str("Start Up Profile Complete"))
+                self.service.set_progress(22)
+                self.service.add_log(str("Entity Details Started"))
                 element=wait.until(EC.element_to_be_clickable((By.XPATH, "//span[normalize-space()='Entity Details']/ancestor::div[contains(@class,'ant-collapse-header')]")))
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
                 driver.execute_script("document.body.click();")
@@ -851,12 +843,15 @@ class Startup_india:
                 value = 0
                 print("1414")
                 option = "Yes" if value == 1 else "No"
-                self.session_manager.update(progress=25,log=f"Options:{option}")
+                self.service.set_progress(25)
+                self.service.add_log(str(f"Options:{option}"))
                 if value==1:
-                    self.session_manager.update(progress=28,log="Yes")
+                    self.service.set_progress(28)
+                    self.service.add_log(str("Yes"))
                     radio_button = wait.until(EC.element_to_be_clickable((By.XPATH,f"(//label[.//input[@type='radio' and @value='Yes']])[1]")))
                 else:
-                    self.session_manager.update(progress=30,log="No")
+                    self.service.set_progress(30)
+                    self.service.add_log(str("No"))
                     radio_button = wait.until(EC.element_to_be_clickable((By.XPATH,f"(//label[.//input[@type='radio' and @value='No']])[1]")))
                 print("1515")
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", radio_button)
@@ -870,8 +865,10 @@ class Startup_india:
                 driver.execute_script("arguments[0].click();", elements)
                 print("1717")
                 time.sleep(1)
-                self.session_manager.update(progress=32,log="Entity Details Completed")
-                self.session_manager.update(progress=34,log="Full Address(Office) Started")
+                self.service.set_progress(32)
+                self.service.add_log(str("Entity Details Completed"))
+                self.service.set_progress(34)
+                self.service.add_log(str("Full Address(Office) Started"))
                 element=wait.until(EC.element_to_be_clickable((By.XPATH, "//span[normalize-space()='Full Address(Office)']/ancestor::div[contains(@class,'ant-collapse-header')]")))
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
                 print("1818")
@@ -992,8 +989,10 @@ class Startup_india:
                 driver.execute_script("arguments[0].click();", element)
                 time.sleep(1)
                 print("3131")
-                self.session_manager.update(progress=36,log="Full Address(Office) Completed")
-                self.session_manager.update(progress=37,log="Authorized Representative Details Started")
+                self.service.set_progress(36)
+                self.service.add_log(str("Full Address(Office) Completed"))
+                self.service.set_progress(37)
+                self.service.add_log(str("Authorized Representative Details Started"))
 
                 element=wait.until(EC.element_to_be_clickable((By.XPATH, "//span[normalize-space()='Authorized Representative Details']/ancestor::div[contains(@class,'ant-collapse-header')]")))
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
@@ -1043,32 +1042,20 @@ class Startup_india:
                 time.sleep(10)
                 print("3232.444")
                 print("Waiting for OTP")
-                self.sessions[self.session_id]["status"] = SessionStatus.WAITING_FOR_OTP
-                MOBILE_OTP_REGEX = re.compile(r"^\d{6}$")  # Mobile OTP (OTP #2): exactly 6 numeric digits
-                EMAIL_OTP_REGEX = re.compile(r"^\d{6}$")   # Email OTP (OTP #3): exactly 6 numeric digits
-                retry=0
-                while True:
-                    if retry==280:
-                        raise Exception("OTP timeout SO Retry it")
-                    mobile=str(self.sessions[self.session_id].get("mobile_otp") or "").strip()
-                    email=str(self.sessions[self.session_id].get("email_otp") or "").strip()
-
-                    if mobile and email:
-                        if not MOBILE_OTP_REGEX.match(mobile):
-                            self.session_manager.update(log=f"Invalid Mobile OTP received (must be exactly 6 digits): '{mobile}'")
-                            self.sessions[self.session_id]["mobile_otp"] = None
-                            self.sessions[self.session_id]["mobile_otp_received"] = False
-                            mobile = ""
-                        if not EMAIL_OTP_REGEX.match(email):
-                            self.session_manager.update(log=f"Invalid Email OTP received (must be exactly 6 digits): '{email}'")
-                            self.sessions[self.session_id]["email_otp"] = None
-                            self.sessions[self.session_id]["email_otp_received"] = False
-                            email = ""
-                        if mobile and email:
-                            break
-                    time.sleep(1)
-                    retry+=1
-                self.session_manager.update(log="Mobile OTP and Email OTP received and validated")
+                # wait_for_multi_otp() polls both slots together, discards any
+                # malformed value while continuing to wait for a fresh one,
+                # and — if 280s pass without both being valid — quits the
+                # driver and raises OTPTimeoutError so this run fails cleanly
+                # and can be retried instead of hanging forever.
+                otp_values = self.service.wait_for_multi_otp(
+                    ["mobile", "email"],
+                    timeout=280,
+                    poll_interval=1,
+                    driver=driver,
+                )
+                mobile = otp_values["mobile"]
+                email = otp_values["email"]
+                self.service.add_log(str("Mobile OTP and Email OTP received and validated"))
                 time.sleep(2)
                 print("3434")
                 mobile_otp_input=wait.until(EC.presence_of_element_located((By.XPATH,"//label[.//span[text()='Mobile Number']]/following::input[@type='password'][1]")))
@@ -1085,7 +1072,7 @@ class Startup_india:
                     btn.click()
                     time.sleep(1)
                     self.wait_loader(driver)
-                self.sessions[self.session_id]["status"] = SessionStatus.OTP_VERIFIED
+                self.service.add_log(str(SessionStatus.OTP_VERIFIED))
                 print("3737")
                 
                 # log.critical("Otp will be triggered")
@@ -1125,8 +1112,10 @@ class Startup_india:
                 time.sleep(1)
                 print("3939")
                 time.sleep(2)
-                self.session_manager.update(progress=38,log="Director(s) / Partner(s) Details")
-                self.session_manager.update(progress=40,log="Director(s) / Partner(s) Details Started")
+                self.service.set_progress(38)
+                self.service.add_log(str("Director(s) / Partner(s) Details"))
+                self.service.set_progress(40)
+                self.service.add_log(str("Director(s) / Partner(s) Details Started"))
 
                 no_of_dir = len(self.data.get("directors"))
                 wait = WebDriverWait(driver, 20)
@@ -1181,7 +1170,8 @@ class Startup_india:
                     time.sleep(3)
 
                     dir_dob=self.data.get("directors", [{}])[i].get("Dob")
-                    self.session_manager.update(progress=42,log=f"Dob:{dir_dob}")
+                    self.service.set_progress(42)
+                    self.service.add_log(str(f"Dob:{dir_dob}"))
                     dob_field = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH,f"(//input[@placeholder='DD/MM/YYYY'])[{i+2}]")))
                     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", dob_field)
                     time.sleep(2)
@@ -1206,8 +1196,10 @@ class Startup_india:
 
                     driver.execute_script("arguments[0].click();", header)
                 print("4141")
-                self.session_manager.update(progress=45,log="Director(s) / Partner(s) Details Completed")
-                self.session_manager.update(progress=47,log="Information required Started")
+                self.service.set_progress(45)
+                self.service.add_log(str("Director(s) / Partner(s) Details Completed"))
+                self.service.set_progress(47)
+                self.service.add_log(str("Information required Started"))
                 element=wait.until(EC.element_to_be_clickable((By.XPATH, "//span[normalize-space()='Information required']/ancestor::div[contains(@class,'ant-collapse-header')]")))
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
                 time.sleep(1)
@@ -1230,13 +1222,16 @@ class Startup_india:
                 wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class,'ant-select-item-option-content') and normalize-space()='{}']".format(stage.title())))).click()
                 value =  0
                 option = "Yes" if value == 1 else "No"
-                self.session_manager.update(progress=50,log=f"Options:{option}")
+                self.service.set_progress(50)
+                self.service.add_log(str(f"Options:{option}"))
                 print("4545")
                 if value==1:
-                    self.session_manager.update(progress=52,log="Yes")
+                    self.service.set_progress(52)
+                    self.service.add_log(str("Yes"))
                     radio_button = wait.until(EC.element_to_be_clickable((By.XPATH,f"(//label[.//input[@type='radio' and @value='Yes']])[2]")))
                 else:
-                    self.session_manager.update(progress=54,log="No")
+                    self.service.set_progress(54)
+                    self.service.add_log(str("No"))
                     radio_button = wait.until(EC.element_to_be_clickable((By.XPATH,f"(//label[.//input[@type='radio' and @value='No']])[2]")))
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", radio_button)
                 driver.execute_script("document.body.click();")
@@ -1249,8 +1244,10 @@ class Startup_india:
                 driver.execute_script("arguments[0].click();", element)
                 time.sleep(1)
                 print("4747")
-                self.session_manager.update(progress=56,log="Information required Completed")
-                self.session_manager.update(progress=58,log="Nature of Startup Started")
+                self.service.set_progress(56)
+                self.service.add_log(str("Information required Completed"))
+                self.service.set_progress(58)
+                self.service.add_log(str("Nature of Startup Started"))
                 nature_header = wait.until(EC.presence_of_element_located((By.XPATH, "//span[normalize-space()='Nature of Startup']/ancestor::div[contains(@class,'ant-collapse-header')]")))
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nature_header)
                 driver.execute_script("document.body.click();")
@@ -1264,8 +1261,10 @@ class Startup_india:
                 driver.execute_script("document.body.click();")
                 driver.execute_script("arguments[0].click();", nature_header)
                 print("4949")
-                self.session_manager.update(progress=60,log="Nature of Startup Completed")
-                self.session_manager.update(progress=62,log="Is the startup creating an innovative product Started")
+                self.service.set_progress(60)
+                self.service.add_log(str("Nature of Startup Completed"))
+                self.service.set_progress(62)
+                self.service.add_log(str("Is the startup creating an innovative product Started"))
                 innovation_header = wait.until(EC.presence_of_element_located((By.XPATH, "//span[contains(normalize-space(),'Is the startup creating an innovative product')]/ancestor::div[contains(@class,'ant-collapse-header')]")))
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", innovation_header)
                 driver.execute_script("document.body.click();")
@@ -1293,8 +1292,10 @@ class Startup_india:
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", innovation_header)
                 driver.execute_script("document.body.click();")
                 driver.execute_script("arguments[0].click();", innovation_header)
-                self.session_manager.update(progress=65,log="Is the startup creating an innovative product Completed")
-                self.session_manager.update(progress=68,log="Is the startup creating a scalable business model Started")
+                self.service.set_progress(65)
+                self.service.add_log(str("Is the startup creating an innovative product Completed"))
+                self.service.set_progress(68)
+                self.service.add_log(str("Is the startup creating a scalable business model Started"))
                 scalable_header = wait.until(EC.presence_of_element_located((By.XPATH, "//span[contains(normalize-space(),'Is the startup creating a scalable business model')]/ancestor::div[contains(@class,'ant-collapse-header')]")))
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", scalable_header)
                 driver.execute_script("document.body.click();")
@@ -1318,9 +1319,11 @@ class Startup_india:
                 driver.execute_script("document.body.click();")
                 driver.execute_script("arguments[0].click();", scalable_header)
 
-                self.session_manager.update(progress=69,log="Is the startup creating a scalable business model Completed")
+                self.service.set_progress(69)
+                self.service.add_log(str("Is the startup creating a scalable business model Completed"))
 
-                self.session_manager.update(progress=70,log="Fill brief note textarea Started")
+                self.service.set_progress(70)
+                self.service.add_log(str("Fill brief note textarea Started"))
                 print("5353") 
                 note_header = wait.until(EC.presence_of_element_located((By.XPATH, "//span[contains(normalize-space(),'Please submit a brief note supporting')]/ancestor::div[contains(@class,'ant-collapse-header')]")))
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", note_header)
@@ -1358,9 +1361,11 @@ class Startup_india:
                 driver.execute_script("document.body.click();")
                 driver.execute_script("arguments[0].click();", funding_header)
 
-                self.session_manager.update(progress=71,log="Has your startup received any funding Completed")
+                self.service.set_progress(71)
+                self.service.add_log(str("Has your startup received any funding Completed"))
 
-                self.session_manager.update(progress=73,log="Startup Activities Started")
+                self.service.set_progress(73)
+                self.service.add_log(str("Startup Activities Started"))
 
                 activities_header = wait.until(EC.presence_of_element_located((By.XPATH, "//span[normalize-space()='Startup Activities']/ancestor::div[contains(@class,'ant-collapse-header')]")))
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", activities_header)
@@ -1405,9 +1410,11 @@ class Startup_india:
                 driver.execute_script("document.body.click();")
                 driver.execute_script("arguments[0].click();", activities_header)
                 print("6161") 
-                self.session_manager.update(progress=74,log="Startup Activities Completed")
+                self.service.set_progress(74)
+                self.service.add_log(str("Startup Activities Completed"))
 
-                self.session_manager.update(progress=76,log="Support Documents Started")
+                self.service.set_progress(76)
+                self.service.add_log(str("Support Documents Started"))
                 print("6262") 
                 time.sleep(1)
                 support_doc_header = wait.until(EC.presence_of_element_located((By.XPATH, "//span[contains(normalize-space(),'Please provide links or upload additional document')]/ancestor::div[contains(@class,'ant-collapse-header')]")))
@@ -1485,13 +1492,15 @@ class Startup_india:
                         f.write(base64.b64decode(pd_base64))
 
                     file_input.send_keys(file_path)
-                    self.session_manager.update(progress=79,log="Pitch Deck Uploading")
+                    self.service.set_progress(79)
+                    self.service.add_log(str("Pitch Deck Uploading"))
                     time.sleep(15)
                     print("6969") 
                     if os.path.exists(file_path):
                         os.remove(file_path)
 
-                    self.session_manager.update(progress=80,log="Pitch Deck Uploaded")
+                    self.service.set_progress(80)
+                    self.service.add_log(str("Pitch Deck Uploaded"))
 
                 time.sleep(10)  
                 print("7070") 
@@ -1500,16 +1509,19 @@ class Startup_india:
                 driver.execute_script("document.body.click();")
                 driver.execute_script("arguments[0].click();", support_doc_header)
                 print("7171") 
-                self.session_manager.update(progress=82,log="Support Documents Completed")
+                self.service.set_progress(82)
+                self.service.add_log(str("Support Documents Completed"))
 
-                self.session_manager.update(progress=83,log="Self Certification Started")
+                self.service.set_progress(83)
+                self.service.add_log(str("Self Certification Started"))
                 print("7272") 
                 self_cert_header = wait.until(EC.presence_of_element_located((By.XPATH, "//span[normalize-space()='Self Certification']/ancestor::div[contains(@class,'ant-collapse-header')]")))
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", self_cert_header)
                 driver.execute_script("document.body.click();")
                 driver.execute_script("arguments[0].click();", self_cert_header)
                 print("7373") 
-                self.session_manager.update(progress=84,log="Self Certification Completed")
+                self.service.set_progress(84)
+                self.service.add_log(str("Self Certification Completed"))
 
                 coi_input = wait.until(EC.element_to_be_clickable((By.XPATH, "(//input[contains(@class,'ant-select-selection-search-input')])[last()-1]")))
 
@@ -1597,19 +1609,22 @@ class Startup_india:
                 driver.execute_script("document.body.click();")
                 driver.execute_script("arguments[0].click();", self_cert_header)
                 print("7878") 
-                self.session_manager.update(progress=85,log="Saving as draft")   
+                self.service.set_progress(85)
+                self.service.add_log(str("Saving as draft"))
                 draft_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(@class,'caf-save-as-draft')]")))
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", draft_button)
                 driver.execute_script("arguments[0].click();", draft_button)
                 time.sleep(5)
-                self.session_manager.update(progress=86,log="Saved as draft")
+                self.service.set_progress(86)
+                self.service.add_log(str("Saved as draft"))
                 print("7979") 
 
                 submit_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(@class,'caf-review-submit')]")))
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", submit_button)
                 driver.execute_script("arguments[0].click();", submit_button)
                 time.sleep(2)
-                self.session_manager.update(progress=87,log="Successfully Submit the Application next Review Application")
+                self.service.set_progress(87)
+                self.service.add_log(str("Successfully Submit the Application next Review Application"))
                 print("8080") 
                 try:
                     status = driver.find_element(By.XPATH, "//span[contains(@class,'form-status-title')]").text
@@ -1617,40 +1632,60 @@ class Startup_india:
                         print("8181") 
                         sections = driver.find_elements(By.XPATH,"//span[contains(text(),'Incomplete data')]/ancestor::div[contains(@class,'ant-collapse-header')]")
                         
-                        self.session_manager.update(progress=100,log="Form is incomplete",error=f"{sections} times incomplete alert occur in the site so contact to develop",status=SessionStatus.FAILED)
+                        self.service.set_progress(100)
+                        self.service.add_log(str(SessionStatus.FAILED) + ": " + str("Form is incomplete"))
+                        self.service.set_error(str(f"{sections} times incomplete alert occur in the site so contact to develop"))
                         return {"status":200,"message":"Form is incomplete","data":status,"sections":sections,"length":len(sections)}
                 except Exception as e:
-                    self.session_manager.update(progress=0,log="No status found")
+                    self.service.set_progress(0)
+                    self.service.add_log(str("No status found"))
                 print("8282") 
                 time.sleep(2)
-                self.session_manager.update(progress=90,log="Review then Sumbit the Application")
+                self.service.set_progress(90)
+                self.service.add_log(str("Review then Sumbit the Application"))
                 checkbox = wait.until(EC.element_to_be_clickable((By.XPATH, "//span[contains(@class,'ant-checkbox-inner')]")))
                 driver.execute_script("arguments[0].click();", checkbox)        
                 print("8383")     
                 submit_btn = driver.find_element(By.XPATH, "//button[normalize-space()='Submit Application']")
-                self.session_manager.update(log=submit_btn.is_enabled())            
+                self.service.add_log(str(submit_btn.is_enabled()))
                 submit_btn.click()
                 print("8484") 
                 time.sleep(5)
-                self.session_manager.update(progress=91,log="After Submit the Application")
+                self.service.set_progress(91)
+                self.service.add_log(str("After Submit the Application"))
                 driver.find_element(By.CLASS_NAME, "sumbit-ok").click()
                 time.sleep(5)
-                self.session_manager.update(progress=92,log="Application Submitted Successfully")
+                self.service.set_progress(92)
+                self.service.add_log(str("Application Submitted Successfully"))
                 print("8585") 
-                file=self.download_file(self,driver)
+                file=self.download_file(driver)
                 print("8686")   
                 error=None
-                self.sessions[self.session_id]["status"] = SessionStatus.COMPLETED
-                self.sessions[self.session_id]["completed_at"] = datetime.datetime.now().isoformat()
-                self.session_manager.update(progress=100,log="Successfully Completed")
+                self.service.add_log(str(SessionStatus.COMPLETED))
+                self.service.set_progress(100)
+                self.service.add_log(str("Successfully Completed"))
                 driver.quit()
                 
-                return {"status":200,"message":"Success completed","timestamp":datetime.datetime.now().isoformat(),"file_reponse":file}
+                result = {"status":200,"message":"Success completed","timestamp":datetime.datetime.now().isoformat(),"file_reponse":file}
+                self.service.set_result(result)
+                return result
         except Exception as e:
-            self.session_manager.update(progress=100,log=f"Program Error : {str(e)}",error=str(e),status=SessionStatus.FAILED)
-            input("Enter..")
-            driver.quit()      
-            
+            self.service.set_progress(100)
+            self.service.add_log(str(SessionStatus.FAILED) + ": " + str(f"Program Error : {str(e)}"))
+            self.service.set_error(str(e))
+            # Driver may already be closed (wait_for_otp / wait_for_multi_otp
+            # quit it themselves on an OTP timeout) — quitting again should
+            # never raise and mask the real error above, so guard it.
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            # Re-raise so the caller (Flask route) sees the failure and the
+            # session status reads FAILED with a real error message, instead
+            # of the run silently returning None on any error, including an
+            # OTPTimeoutError — that error should reach the API/caller so a
+            # retry can be triggered.
+            raise
     
     def run(self):
         try:
@@ -1660,3 +1695,11 @@ class Startup_india:
             import traceback
             #print("ERROR:", e)
             traceback.print_exc()
+            # Re-raise (instead of swallowing and returning None) so the
+            # Flask worker thread in automation_framework.py sees the
+            # failure and calls set_error()/records it on the session.
+            # Without this, an OTP timeout — or any other error — was
+            # invisible to /status: the session just looked like it quietly
+            # finished with an empty result, which is why "OTP not received"
+            # never surfaced anywhere the caller could see and retry on.
+            raise
