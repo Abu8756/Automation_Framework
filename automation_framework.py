@@ -768,6 +768,9 @@ _EPFO_USERNAME_RE   = re.compile(r"^[A-Z]{5}[0-9]{10}$")      # 5 uppercase lett
 _UAN_RE             = re.compile(r"^\d{12}$")                 # UAN — 12 digits (same shape as Aadhaar, kept separate for its own message)
 _SINGLE_ALPHA_RE    = re.compile(r"^[A-Za-z]$")                # exactly one alphabetic character (marital status code)
 
+# -------- udyam_certificate-specific --------
+_UDYAM_RE           = re.compile(r"^UDYAM-[A-Z]{2}-\d{2}-\d{7}$")  # e.g. UDYAM-KR-06-0043268
+
 # -------- per-OTP-type validation, keyed by the "otp_type" field on /<service>/otp --------
 _SIX_DIGIT_OTP_RE = re.compile(r"^\d{6}$")
 _OTP_TYPE_PATTERNS = {
@@ -1389,6 +1392,31 @@ class EPFOService(AutomationService):
 
         self.add_log("Launching EPFO PF member onboarding automation")
         obj = EPFOOnboarding(data=data, session=self.framework.sessions.get(self.session_id))
+        return obj.run()
+
+
+@framework.service("udyam_certificate", schema={
+    "udyam_no": {
+        "type": str, "required": True,
+        "pattern": _UDYAM_RE,
+        "pattern_message": "'udyam_no' must look like UDYAM-XX-00-0000000",
+    },
+    "phone": {
+        "type": str, "required": True,
+        "pattern": _MOBILE_RE,
+        "pattern_message": "'phone' must be exactly 10 digits",
+    },
+})
+class UdyamCertificateService(AutomationService):
+    def run(self, data):
+        from udyam_certificate import UdyamCertificate
+
+        self.add_log("Launching Udyam certificate download automation")
+        # Same pattern as StartupIndiaService/EPFOService: hand this
+        # AutomationService instance itself to the module so it can log,
+        # report progress, and block on wait_for_otp() through the
+        # framework rather than keeping any session state of its own.
+        obj = UdyamCertificate(data=data, service=self)
         return obj.run()
 
 
