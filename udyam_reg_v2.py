@@ -1062,6 +1062,10 @@ class UdyamRegistration:
             self.service.set_progress(100)
             self.service.add_log("Udyam Registration Completed Successfully")
 
+            input("1...") 
+            input("2...") 
+            input("1...")
+
             self.driver.quit()
             self.service.add_log("Browser closed successfully")
 
@@ -1090,7 +1094,9 @@ class UdyamRegistration:
                     self.service.add_log("Captured error screenshot")
                 except Exception as screenshot_error:
                     self.service.add_log(f"Could not capture error screenshot: {screenshot_error}")
-
+            input("1...") 
+            input("2...") 
+            input("1...") 
             # Quit only after the screenshot attempt above. Guarded because
             # the driver may already be closed (self.service.wait_for_otp()
             # quits it itself on an OTP timeout) — quitting again should
