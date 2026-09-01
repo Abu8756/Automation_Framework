@@ -7,7 +7,7 @@ import uuid
 import datetime
 
 from flask import Flask, request, jsonify
-
+from flask_cors import CORS
 
 def _now() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -142,6 +142,10 @@ class AutomationFramework:
     def __init__(self, name: str = __name__, log_path: str = "logs/sessions.log", port: int = 3333):
         self.app = Flask(name)
         self.port = port
+        CORS(
+                self.app,
+                origins="https://indiafilings-tau.vercel.app"
+            )
 
         self.sessions = {}          # session_id -> session dict
         self._lock = threading.Lock()
@@ -807,7 +811,7 @@ _ADDRESS_SCHEMA = {
 # -------- allowed values for udyamreg dropdown/radio fields --------
 ORG_TYPE_CHOICES = [str(n) for n in range(1, 12)]              # 1..11
 SOCIAL_CATEGORY_CHOICES = ["1", "2", "3", "4"]
-GENDER_CHOICES = ["0", "1", "2"]
+GENDER_CHOICES = ["1", "2", "3"]
 DIVYANG_CHOICES = ["0", "1"]
 MAJOR_ACTIVITY_CHOICES = ["1", "2"]
 MAJOR_ACTIVITY_UNDER_SERVICES_CHOICES = ["1", "2"]
