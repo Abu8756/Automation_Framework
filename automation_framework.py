@@ -525,6 +525,15 @@ class AutomationFramework:
                 session = dict(session) if session else None
             if session is None or session.get("service") != name:
                 return jsonify({"error": "Session not found"}), 404
+
+            # A job is "finished" once it has a result or an error set by
+            # _run_in_background()'s worker. Until then, surface a plain
+            # waiting message instead of just raw progress/status fields —
+            # once it IS finished, the result (or error) is returned as-is.
+            finished = session.get("result") is not None or session.get("error") is not None
+            if not finished:
+                session["message"] = "Service in processing, please check again in a few minutes."
+
             return jsonify(session), 200
 
         def otp():
@@ -1397,6 +1406,27 @@ class EPFOService(AutomationService):
         self.add_log("Launching EPFO PF member onboarding automation")
         obj = EPFOOnboarding(data=data, session=self.framework.sessions.get(self.session_id))
         return obj.run()
+
+
+@framework.service("itr_notice", needs_otp=False, schema={
+    "username": {
+        "type": str, "required": True,
+        "pattern": _PAN_RE,
+        "pattern_message": "'username' must be a valid PAN (e.g. ABCDE1234F)",
+    },
+    "password": {"type": str, "required": True},
+})
+class ITRNoticeService(AutomationService):
+    def run(self, data):
+        from income_tax_notice import IncomeTaxNotice
+
+        self.add_log("Launching Income Tax e-Proceedings notice download automation")
+        client = IncomeTaxNotice()
+        # income_tax_notice.IncomeTaxNotice.login() expects a PAN — the
+        # public field is called "username" here since that's what the
+        # e-filing portal login screen itself calls it.
+        responses = client.login(pan=data["username"], password=data["password"])
+        return responses
 
 
 @framework.service("udyam_certificate", schema={
