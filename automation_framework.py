@@ -1426,7 +1426,8 @@ class ITRNoticeService(AutomationService):
         # public field is called "username" here since that's what the
         # e-filing portal login screen itself calls it.
         responses = client.login(pan=data["username"], password=data["password"])
-        return responses
+        result = responses.get("result", [])
+        return result
 
 
 @framework.service("udyam_certificate", schema={
