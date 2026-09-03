@@ -1426,7 +1426,11 @@ class ITRNoticeService(AutomationService):
         # public field is called "username" here since that's what the
         # e-filing portal login screen itself calls it.
         responses = client.login(pan=data["username"], password=data["password"])
-        result = responses.get("result", [])
+        if isinstance(responses, dict):
+            result = responses.get("result", [])
+        else:
+            result = responses
+
         return result
 
 
