@@ -527,14 +527,29 @@ class AutomationFramework:
                 return jsonify({"error": "Session not found"}), 404
 
             # A job is "finished" once it has a result or an error set by
-            # _run_in_background()'s worker. Until then, surface a plain
-            # waiting message instead of just raw progress/status fields —
-            # once it IS finished, the result (or error) is returned as-is.
+            # _run_in_background()'s worker.
             finished = session.get("result") is not None or session.get("error") is not None
-            if not finished:
-                session["message"] = "Service in processing, please check again in a few minutes."
 
-            return jsonify(session), 200
+            if not finished:
+                return jsonify({
+                    "service": name,
+                    "session_id": session_id,
+                    "finished": False,
+                    "message": "Service in processing, please check again in a few minutes.",
+                }), 200
+
+            if session.get("error"):
+                return jsonify({
+                    "service": name,
+                    "session_id": session_id,
+                    "finished": True,
+                    "status": "failed",
+                    "error": session.get("error"),
+                }), 200
+
+            # Done, no error -> hand back just the result itself, not the
+            # whole session (logs/otp/payload/etc).
+            return jsonify(session.get("result")), 200
 
         def otp():
             data = request.get_json(silent=True) or {}
