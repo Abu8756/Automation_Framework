@@ -262,15 +262,18 @@ class IncomeTaxNotice:
             data = {"raw": r.text}
         ids = []
         year_map = {}
+        proceeding_map = {}
         for item in data.get("eProceedingPaginatedRequests", []):
             proceeding_id = item.get("proceedingReqId")
             ids.append(proceeding_id)
             year_map[proceeding_id] = item.get("assessmentYear")
+            proceeding_map[proceeding_id] = item
         return {
             "status_code": r.status_code,
             "response": data,
             "proceeding_ids": ids,
-            "proceeding_year_map": year_map
+            "proceeding_year_map": year_map,
+            "proceeding_map": proceeding_map
         }
     
     def get_proceeding_details(self, pan, proceedingReqId):
@@ -437,9 +440,10 @@ class IncomeTaxNotice:
         print("STEP-4")
         proceedings = self.get_proceedings(pan)
         year_map = proceedings.get("proceeding_year_map", {})
+        proceeding_map = proceedings.get("proceeding_map", {})
 
         # notices grouped by assessmentYear:
-        # { "2024": [ {"notice": {...}, "file": {...}}, ... ], ... }
+        # { "2024": [ {"eproceeding": {...}, "notice": {...}, "file": {...}}, ... ], ... }
         notices_by_year = {}
 
         for proceeding_id in proceedings["proceeding_ids"]:
@@ -452,6 +456,7 @@ class IncomeTaxNotice:
 
             assessment_year = year_map.get(proceeding_id)
             year_key = str(assessment_year) if assessment_year is not None else "unknown"
+            eproceeding = proceeding_map.get(proceeding_id, {})
 
             for notice in details.get("notices", []):
 
@@ -482,7 +487,13 @@ class IncomeTaxNotice:
                     proceeding_id=proceeding_id
                 )
 
+                # match the parent eProceedingPaginatedRequests item
+                # (by proceedingReqId) against this notice's own
+                # proceedingReqId, in case they ever diverge
+                matched_eproceeding = proceeding_map.get(proceedingReqId, eproceeding)
+
                 notices_by_year.setdefault(year_key, []).append({
+                    "eproceeding": matched_eproceeding,
                     "notice": notice,
                     "file": document
                 })
