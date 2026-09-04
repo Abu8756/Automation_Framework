@@ -75,15 +75,35 @@ class IncomeTaxNotice:
            json=payload,    timeout=30
         )
 
+        print(r.text)
+
         try:
             data = r.json()
         except ValueError:
-            data = {"raw": r.text}
-        print(r.text)
+            return {
+                "registered": False,
+                "message_code": None,
+                "desc": "Invalid/empty response from server",
+                "reqId": None,
+                "entityType": None,
+                "role": None
+            }
+
+        messages = data.get("messages", [])
+        message_code = messages[0].get("code") if messages else None
+        desc = messages[0].get("desc") if messages else None
+
+        if message_code == "EF00036":
+            registered = False
+        elif message_code == "EF00000":
+            registered = True
+        else:
+            registered = None
 
         return {
-            "status_code": r.status_code,
-            "response": data,
+            "registered": registered,
+            "message_code": message_code,
+            "desc": desc,
             "reqId": data.get("reqId"),
             "entityType": data.get("entityType"),
             "role": data.get("role")
@@ -146,9 +166,34 @@ class IncomeTaxNotice:
         )
         print(r.text)
 
+        try:
+            data = r.json()
+        except ValueError:
+            return {
+                "status_code": r.status_code,
+                "valid": False,
+                "message_code": None,
+                "desc": "Invalid/empty response from server",
+                "response": None
+            }
+
+        messages = data.get("messages", [])
+        message_code = messages[0].get("code") if messages else None
+        desc = messages[0].get("desc") if messages else None
+
+        if message_code == "EF00027":
+            valid = False
+        elif message_code == "EF00000":
+            valid = True
+        else:
+            valid = None
+
         return {
             "status_code": r.status_code,
-            "response": r.json()
+            "valid": valid,
+            "message_code": message_code,
+            "desc": desc,
+            "response": data
         }
 
     ########################################################
@@ -173,9 +218,14 @@ class IncomeTaxNotice:
         )
         print(r.text)
 
+        try:
+            data = r.json()
+        except ValueError:
+            data = {"raw": r.text}
+
         return {
             "status_code": r.status_code,
-            "response": r.text
+            "response": data
         }
         
     def get_proceedings(self, pan):
@@ -211,12 +261,16 @@ class IncomeTaxNotice:
         except ValueError:
             data = {"raw": r.text}
         ids = []
+        year_map = {}
         for item in data.get("eProceedingPaginatedRequests", []):
-            ids.append(item.get("proceedingReqId"))
+            proceeding_id = item.get("proceedingReqId")
+            ids.append(proceeding_id)
+            year_map[proceeding_id] = item.get("assessmentYear")
         return {
             "status_code": r.status_code,
             "response": data,
-            "proceeding_ids": ids
+            "proceeding_ids": ids,
+            "proceeding_year_map": year_map
         }
     
     def get_proceeding_details(self, pan, proceedingReqId):
@@ -328,21 +382,37 @@ class IncomeTaxNotice:
         }
 
     ########################################################
+    # KEY NORMALIZATION HELPER
+    ########################################################
+
+    @staticmethod
+    def _lowercase_keys(obj):
+        """
+        Recursively lowercase every dict key in a nested
+        structure of dicts/lists, leaving values untouched.
+        """
+        if isinstance(obj, dict):
+            return {
+                (k.lower() if isinstance(k, str) else k): IncomeTaxNotice._lowercase_keys(v)
+                for k, v in obj.items()
+            }
+        elif isinstance(obj, list):
+            return [IncomeTaxNotice._lowercase_keys(item) for item in obj]
+        else:
+            return obj
+
+    ########################################################
     # COMPLETE LOGIN
     ########################################################
     
     def login(self, pan, password):
 
-        responses = []
-        
         # STEP-1
         time.sleep(5)
         print("STEP-1")
         step1 = self.validate_pan(pan)
-        responses.append(step1)
-        
-        if not step1.get("reqId"):
-            return responses
+        if not step1.get("registered"):
+            return step1.get("desc") or "Pan Validation is Falied so check Pan Number in the Portal"
 
         # STEP-2
         time.sleep(5)
@@ -354,22 +424,23 @@ class IncomeTaxNotice:
             step1["entityType"],
             step1["role"]
         )
-        responses.append(step2)
+        if step2.get("valid") is False:
+            return step2.get("desc") or "Invalid Password, Please retry."
 
         # STEP-3
         time.sleep(5)
         print("STEP-3")
         step3 = self.save_entity(pan)
-        responses.append(step3)
 
-        
         # STEP-4
         time.sleep(5)
         print("STEP-4")
         proceedings = self.get_proceedings(pan)
-        responses.append(proceedings)
+        year_map = proceedings.get("proceeding_year_map", {})
 
-        notice_base64 = []
+        # notices grouped by assessmentYear:
+        # { "2024": [ {"notice": {...}, "file": {...}}, ... ], ... }
+        notices_by_year = {}
 
         for proceeding_id in proceedings["proceeding_ids"]:
 
@@ -378,6 +449,9 @@ class IncomeTaxNotice:
                 pan,
                 proceeding_id
             )
+
+            assessment_year = year_map.get(proceeding_id)
+            year_key = str(assessment_year) if assessment_year is not None else "unknown"
 
             for notice in details.get("notices", []):
 
@@ -407,18 +481,16 @@ class IncomeTaxNotice:
                     headerSeqNo=headerSeqNo,
                     proceeding_id=proceeding_id
                 )
-                # carry along a bit of context for identification
-                document["noticeSection"] = notice.get("noticeSection")
-                document["description"] = notice.get("description")
 
-                notice_base64.append(document)
+                notices_by_year.setdefault(year_key, []).append({
+                    "notice": notice,
+                    "file": document
+                })
 
-        responses.append({
-            "notice": {
-                "proceeding_ids": proceedings["proceeding_ids"],
-                "count": len(notice_base64),
-                "notice_base64": notice_base64
-            }
-        })
+        final_data = {
+            "details": step3.get("response"),
+            "notices": notices_by_year
+        }
 
-        return responses
+        # normalize every key in the final payload to lowercase
+        return self._lowercase_keys(final_data)
