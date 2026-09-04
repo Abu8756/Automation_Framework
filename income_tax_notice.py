@@ -7,6 +7,35 @@ urllib3.disable_warnings(
     urllib3.exceptions.InsecureRequestWarning
 )
 
+def _pick_message(messages):
+    """Pick the most relevant message out of a portal response's 'messages'
+    list.
+
+    The e-filing login API can return more than one message together —
+    e.g. an informational "EF00000 / OK" plus an ERROR further down such
+    as "EF00177 / Session already active". Reading only messages[0] misses
+    that ERROR entirely and lets the caller believe the step succeeded, so
+    here we scan the whole list and let any ERROR-type message win over an
+    INFO one. Falls back to messages[0] if there's no ERROR present.
+    """
+    if not messages:
+        return None, None
+    for m in messages:
+        if str(m.get("type", "")).upper() == "ERROR":
+            return m.get("code"), m.get("desc")
+    return messages[0].get("code"), messages[0].get("desc")
+
+
+# Portal message code for "another session is already active for this
+# user". This is a transient/retryable condition, not a hard validation
+# failure — surfaced to the caller with a clearer, actionable message.
+_SESSION_ACTIVE_CODE = "EF00177"
+_SESSION_ACTIVE_MESSAGE = (
+    "Session already active on the Income Tax e-filing portal. "
+    "Please wait a few minutes and try again."
+)
+
+
 class IncomeTaxNotice:
 
     def __init__(self):
@@ -90,10 +119,12 @@ class IncomeTaxNotice:
             }
 
         messages = data.get("messages", [])
-        message_code = messages[0].get("code") if messages else None
-        desc = messages[0].get("desc") if messages else None
+        message_code, desc = _pick_message(messages)
 
-        if message_code == "EF00036":
+        if message_code == _SESSION_ACTIVE_CODE:
+            registered = None
+            desc = _SESSION_ACTIVE_MESSAGE
+        elif message_code == "EF00036":
             registered = False
         elif message_code == "EF00000":
             registered = True
@@ -178,10 +209,12 @@ class IncomeTaxNotice:
             }
 
         messages = data.get("messages", [])
-        message_code = messages[0].get("code") if messages else None
-        desc = messages[0].get("desc") if messages else None
+        message_code, desc = _pick_message(messages)
 
-        if message_code == "EF00027":
+        if message_code == _SESSION_ACTIVE_CODE:
+            valid = False
+            desc = _SESSION_ACTIVE_MESSAGE
+        elif message_code == "EF00027":
             valid = False
         elif message_code == "EF00000":
             valid = True
