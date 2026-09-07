@@ -643,6 +643,21 @@ class UdyamRegistration:
                 if opt.get_attribute("value") == str(self.data["previous_em"]):
                     self.driver.execute_script("arguments[0].click();", opt)
                     break
+
+
+            time.sleep(5)
+            
+            previous_type = self.data["previous_em"]
+            previous_number = self.data["previous_em_no"]
+            if previous_type == 2:
+                # EM-II
+                self.driver.find_element(By.ID,"ctl00_ContentPlaceHolder1_txtPreviousNumber").send_keys(previous_number)
+            elif previous_type == 4:
+                # Previous UAM
+                self.driver.find_element(By.ID,"ctl00_ContentPlaceHolder1_txtPreviousNumber").send_keys(previous_number)
+
+
+
             # 🔹 Scroll to section
             inc_section = self.wait.until(EC.presence_of_element_located((By.XPATH, "(//b[contains(text(),'Date of Incorporation')])[2]")))
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inc_section)
@@ -1083,10 +1098,6 @@ class UdyamRegistration:
             self.service.add_log(f"Automation failed: {e}")
             self.service.set_error(str(e))
 
-            # Grab a screenshot of whatever the browser is showing at the
-            # moment of failure — this has to happen BEFORE driver.quit(),
-            # since a quit driver can no longer be screenshotted. If the
-            # driver never even got created, there's nothing to shoot.
             screenshot_base64 = None
             if self.driver is not None:
                 try:
@@ -1097,10 +1108,6 @@ class UdyamRegistration:
             input("1...") 
             input("2...") 
             input("1...") 
-            # Quit only after the screenshot attempt above. Guarded because
-            # the driver may already be closed (self.service.wait_for_otp()
-            # quits it itself on an OTP timeout) — quitting again should
-            # never raise and mask the real error.
             if self.driver is not None:
                 try:
                     self.driver.quit()
@@ -1124,11 +1131,4 @@ class UdyamRegistration:
         except Exception as e:
             import traceback
             traceback.print_exc()
-            # udyam_reg_v2() now catches its own exceptions (captures a
-            # screenshot, quits the driver, calls set_error/set_result, and
-            # returns an error dict instead of raising) — this branch is a
-            # last-resort safety net for anything that manages to escape
-            # that handling anyway. Re-raise here so the Flask worker thread
-            # in automation_framework.py still records the failure via
-            # set_error() instead of it vanishing silently.
             raise
