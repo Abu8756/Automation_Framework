@@ -646,8 +646,8 @@ class UdyamRegistration:
 
 
             time.sleep(5)
-            
-            previous_type = self.data["previous_em"]
+
+            previous_type = int(self.data["previous_em"])
             previous_number = self.data["previous_em_no"]
             if previous_type == 2:
                 # EM-II
