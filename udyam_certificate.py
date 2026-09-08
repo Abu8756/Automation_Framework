@@ -109,6 +109,7 @@ def _solve_captcha(img_bytes):
         cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         final = cv2.bitwise_not(cleaned)
         text = pytesseract.image_to_string(final, config=TESSERACT_CONFIG)
+        print(f"TEXT:{text}")
         val = "".join(c for c in text if c.isalnum()).upper()
         return val or "000000"
     except Exception as e:
