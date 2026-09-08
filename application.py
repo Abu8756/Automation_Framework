@@ -678,7 +678,7 @@ class EPFOService(AutomationService):
         return obj.run()
 
 
-@framework.service("itr_notice", needs_otp=False, schema={
+@framework.service("itr_notice", needs_otp=False, unique_key="username", schema={
     "username": {
         "type": str, "required": True,
         "pattern": _PAN_RE,

@@ -165,6 +165,12 @@ class AutomationFramework:
         self._lock = threading.Lock()
 
         self.services = {}          # service_name -> service class
+        # (service_name, unique_key_value) -> session_id, for services
+        # registered with unique_key=... on @framework.service(). Entries
+        # are added when a session starts and removed once it finishes
+        # (result/error set) or is deleted — see _register_active_key(),
+        # _release_active_key(), _active_session_for_key().
+        self.active_keys = {}
         self.log_path = log_path
 
         directory = os.path.dirname(log_path)
@@ -176,7 +182,7 @@ class AutomationFramework:
     # ------------------------------------------------------------------
     # Service registration — the ONE decorator every service uses
     # ------------------------------------------------------------------
-    def service(self, name: str, schema: dict = None, needs_otp: bool = True):
+    def service(self, name: str, schema: dict = None, needs_otp: bool = True, unique_key: str = None):
         schema = schema or {}
 
         def decorator(cls):
@@ -186,6 +192,12 @@ class AutomationFramework:
             # skips registering /<name>/otp entirely, so hitting it returns a
             # plain Flask 404 instead of a fake "not needed" response.
             cls.NEEDS_OTP = needs_otp
+            # unique_key names a field in the service's own payload schema
+            # (e.g. "username" holding a PAN) that identifies "the thing
+            # being automated". While a session for a given value of that
+            # field is still running, /<name>/start refuses to spin up a
+            # second one for the same value — see _active_session_for_key().
+            cls.UNIQUE_KEY = unique_key
             self.services[name] = cls
             self._register_service_routes(name, cls)
             return cls
@@ -487,7 +499,43 @@ class AutomationFramework:
             }
         return session_id
 
+    # ------------------------------------------------------------------
+    # unique_key dedup — "is this PAN/username/whatever already running?"
+    # ------------------------------------------------------------------
+    def _active_session_for_key(self, service_name: str, key_value):
+        """Return the session_id already running for (service_name, key_value),
+        or None if there isn't one. Also clears out the mapping if the
+        session it points to has since finished or vanished, so a stale
+        entry never blocks a new /start forever."""
+        if key_value is None:
+            return None
+        with self._lock:
+            existing_id = self.active_keys.get((service_name, key_value))
+            if not existing_id:
+                return None
+            session = self.sessions.get(existing_id)
+            finished = session is None or session.get("result") is not None or session.get("error") is not None
+            if finished:
+                self.active_keys.pop((service_name, key_value), None)
+                return None
+            return existing_id
+
+    def _register_active_key(self, service_name: str, key_value, session_id: str):
+        if key_value is None:
+            return
+        with self._lock:
+            self.active_keys[(service_name, key_value)] = session_id
+
+    def _release_active_key(self, service_name: str, key_value):
+        if key_value is None:
+            return
+        with self._lock:
+            self.active_keys.pop((service_name, key_value), None)
+
     def _run_in_background(self, service_cls, session_id: str, data: dict):
+        unique_key = getattr(service_cls, "UNIQUE_KEY", None)
+        key_value = data.get(unique_key) if unique_key else None
+
         def worker():
             try:
                 self.add_log(session_id, "Automation started")
@@ -500,6 +548,10 @@ class AutomationFramework:
                 traceback.print_exc()
                 self.set_error(session_id, str(e))
                 self.add_log(session_id, f"Error: {str(e)}", level="ERROR")
+            finally:
+                # free up the unique key regardless of success/failure so a
+                # later /start for the same PAN/username isn't blocked forever
+                self._release_active_key(service_cls.SERVICE_NAME, key_value)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -520,7 +572,23 @@ class AutomationFramework:
             if errors:
                 return jsonify({"error": "Payload validation failed", "details": errors}), 422
 
+            unique_key = getattr(cls, "UNIQUE_KEY", None)
+            key_value = data.get(unique_key) if unique_key else None
+
+            if unique_key:
+                existing_session_id = self._active_session_for_key(name, key_value)
+                if existing_session_id:
+                    return jsonify({
+                        "service": name,
+                        "status": "already_running",
+                        "message": f"This {key_value} is running on automation",
+                        unique_key: key_value,
+                        "session_id": existing_session_id,
+                    }), 409
+
             session_id = self._create_session(name, data)
+            if unique_key:
+                self._register_active_key(name, key_value, session_id)
             self._run_in_background(cls, session_id, data)
 
             return jsonify({"service": name, "session_id": session_id, "status": "Automation started"}), 202
@@ -579,8 +647,16 @@ class AutomationFramework:
                 }), 200
 
             # Done, no error -> hand back just the result itself, not the
-            # whole session (logs/otp/payload/etc).
-            return jsonify(session.get("result")), 200
+            # whole session (logs/otp/payload/etc). A service can put a
+            # "status_code" key in its own result dict (e.g. 409 for
+            # "portal session already active", 401 for "bad password") to
+            # drive the actual HTTP status of this response; anything else
+            # (including a plain string/list result) just gets 200.
+            result = session.get("result")
+            http_status = 200
+            if isinstance(result, dict) and isinstance(result.get("status_code"), int):
+                http_status = result["status_code"]
+            return jsonify(result), http_status
 
         def otp():
             data = request.get_json(silent=True) or {}
@@ -617,6 +693,10 @@ class AutomationFramework:
                 if existed:
                     self.sessions.pop(session_id, None)
             if existed:
+                unique_key = getattr(cls, "UNIQUE_KEY", None)
+                if unique_key:
+                    key_value = (session.get("payload") or {}).get(unique_key)
+                    self._release_active_key(name, key_value)
                 return jsonify({"status": "Deleted", "session_id": session_id}), 200
             return jsonify({"error": "Session not found"}), 404
 

@@ -448,7 +448,21 @@ class IncomeTaxNotice:
         print("STEP-1")
         step1 = self.validate_pan(pan)
         if not step1.get("registered"):
-            return step1.get("desc") or "Pan Validation is Falied so check Pan Number in the Portal"
+            # step1["registered"] is None (rather than False) specifically
+            # when the portal reported "session already active" — surface
+            # that as a 409 so the caller can tell "retry shortly" apart
+            # from "this PAN isn't registered" (400).
+            if step1.get("message_code") == _SESSION_ACTIVE_CODE:
+                return {
+                    "status": "failed",
+                    "status_code": 409,
+                    "message": step1.get("desc") or _SESSION_ACTIVE_MESSAGE,
+                }
+            return {
+                "status": "failed",
+                "status_code": 400,
+                "message": step1.get("desc") or "Pan Validation is Failed, please check the PAN number.",
+            }
 
         # STEP-2
         time.sleep(5)
@@ -461,7 +475,17 @@ class IncomeTaxNotice:
             step1["role"]
         )
         if step2.get("valid") is False:
-            return step2.get("desc") or "Invalid Password, Please retry."
+            if step2.get("message_code") == _SESSION_ACTIVE_CODE:
+                return {
+                    "status": "failed",
+                    "status_code": 409,
+                    "message": step2.get("desc") or _SESSION_ACTIVE_MESSAGE,
+                }
+            return {
+                "status": "failed",
+                "status_code": 401,
+                "message": step2.get("desc") or "Invalid Password, Please retry.",
+            }
 
         # STEP-3
         time.sleep(5)
@@ -532,6 +556,8 @@ class IncomeTaxNotice:
                 })
 
         final_data = {
+            "status": "success",
+            "status_code": 200,
             "details": step3.get("response"),
             "notices": notices_by_year
         }
