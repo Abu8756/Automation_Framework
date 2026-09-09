@@ -24,8 +24,8 @@ import os
 import time
 
 import cv2
+import easyocr
 import numpy as np
-import pytesseract
 from selenium import webdriver
 
 from automation_framework import OTPTimeoutError
@@ -41,10 +41,11 @@ os.makedirs(DEBUG_DIR, exist_ok=True)
 MAX_OTP_VERIFY_ATTEMPTS = 4
 OTP_TIMEOUT_SECONDS = 180.0
 
-# pytesseract shells out to the system `tesseract` binary (apt package
-# tesseract-ocr) rather than loading an in-process model, so there's no
-# module-level reader object to initialize here anymore.
-TESSERACT_CONFIG = "--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+# Loaded once per process, the first time this module is imported (lazily,
+# from inside UdyamCertificateService.run()) — same cost/behaviour as the
+# original Flask app's module-level `reader = easyocr.Reader(...)`.
+print("Initializing EasyOCR reader...")
+reader = easyocr.Reader(["en"], gpu=False)
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +109,8 @@ def _solve_captcha(img_bytes):
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
         cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         final = cv2.bitwise_not(cleaned)
-        text = pytesseract.image_to_string(final, config=TESSERACT_CONFIG)
-        print(f"TEXT:{text}")
-        val = "".join(c for c in text if c.isalnum()).upper()
+        results = reader.readtext(final, detail=0)
+        val = "".join(c for c in "".join(results) if c.isalnum()).upper()
         return val or "000000"
     except Exception as e:
         print(f"Captcha error: {e}")
