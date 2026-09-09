@@ -791,27 +791,31 @@ class UdyamRegistration:
     
             # 🔹 Select NIC 2 Digit
             print("NIC 1 ---> ",self.data["nic"]["nic2"])
-            nic2 = Select(self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl2NicCode"))))
-            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic2)
-            time.sleep(2)
+            nic2_ele=self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl2NicCode")))
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic2_ele)
+            time.sleep(3)
+            nic2 = Select(nic2_ele)
+            
             nic2.select_by_value(self.data["nic"]["nic2"])
             self.wait_loader_loop()
             time.sleep(4)
     
             # 🔹 Select NIC 4 Digit
             print("NIC 4 ---> ",self.data["nic"]["nic4"])
-            nic4 = Select(self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl4NicCode"))))
-            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic4)
-            time.sleep(2)
+            nic4_ele=self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl4NicCode")))
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic4_ele)
+            time.sleep(3)
+            nic4 = Select(nic4_ele)
             nic4.select_by_value(self.data["nic"]["nic4"])
             self.wait_loader_loop()
             time.sleep(4)
     
             # 🔹 Select NIC 5 Digit
             print("NIC 5 ---> ",self.data["nic"]["nic5"])
-            nic5 = Select(self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl5NicCode"))))
-            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic5)
-            time.sleep(2)
+            nic5_ele=self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl5NicCode")))
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic5_ele)
+            time.sleep(3)
+            nic5 = Select(nic5_ele)
             nic5.select_by_value(self.data["nic"]["nic5"])
             self.wait_loader_loop()
             time.sleep(4)
