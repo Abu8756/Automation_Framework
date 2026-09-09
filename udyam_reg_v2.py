@@ -792,23 +792,29 @@ class UdyamRegistration:
             # 🔹 Select NIC 2 Digit
             print("NIC 1 ---> ",self.data["nic"]["nic2"])
             nic2 = Select(self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl2NicCode"))))
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic2)
+            time.sleep(2)
             nic2.select_by_value(self.data["nic"]["nic2"])
             self.wait_loader_loop()
-            time.sleep(2)
+            time.sleep(4)
     
             # 🔹 Select NIC 4 Digit
             print("NIC 4 ---> ",self.data["nic"]["nic4"])
             nic4 = Select(self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl4NicCode"))))
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic4)
+            time.sleep(2)
             nic4.select_by_value(self.data["nic"]["nic4"])
             self.wait_loader_loop()
-            time.sleep(2)
+            time.sleep(4)
     
             # 🔹 Select NIC 5 Digit
             print("NIC 5 ---> ",self.data["nic"]["nic5"])
             nic5 = Select(self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl5NicCode"))))
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic5)
+            time.sleep(2)
             nic5.select_by_value(self.data["nic"]["nic5"])
             self.wait_loader_loop()
-            time.sleep(2)
+            time.sleep(4)
     
             # 🔹 Click Add Activity
             add_btn = self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_btnAddMore")))
