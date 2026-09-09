@@ -648,7 +648,7 @@ class UdyamRegistration:
             time.sleep(5)
 
             previous_type = int(self.data["previous_em"])
-            previous_number = self.data["previous_em_no"]
+            previous_number = self.data.get("previous_em_no",0)
             if previous_type == 2:
                 # EM-II
                 self.driver.find_element(By.ID,"ctl00_ContentPlaceHolder1_txtPreviousNumber").send_keys(previous_number)
