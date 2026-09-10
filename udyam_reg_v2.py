@@ -392,10 +392,11 @@ class UdyamRegistration:
                     pass  # Continue
 
                 elif "Udyam Registration has already done" in message:
-                    return {
-                        "status": False,
-                        "message": message
-                    }
+                    raise "This pan Number already verified in the portal, So apply the udyam cancellation then try it"
+                    # return {
+                    #     "status": False,
+                    #     "message": message
+                    # }
 
             except NoSuchElementException:
                 pass  # Element not found, continue if appropriate
