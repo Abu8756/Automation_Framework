@@ -382,10 +382,11 @@ class UdyamRegistration:
                 message = error.text.strip()
 
                 if "You can not verify PAN more than 5 times in a day." in error.text:
-                    return {
-                        "status": False,
-                        "message": error.text.strip()
-                    }
+                    raise f"Already Five times used in the portal this pan number {self.data["pan_number"]},So You can not verify PAN more than 5 times in a day."
+                    # return {
+                    #     "status": False,
+                    #     "message": error.text.strip()
+                    # }
 
                 if "Your PAN has been successfully verified" in message:
                     pass  # Continue
