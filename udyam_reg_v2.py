@@ -410,6 +410,19 @@ class UdyamRegistration:
             self.driver.execute_script("arguments[0].click();", continue_btn)
             self.service.add_log("Continue button clicked successfully")
             time.sleep(4)
+
+
+            #----------------------------------------------------------------------------------- #
+            #                                                                                    #  
+            #  44.2 Have you filed the ITR for Previous Year(PY) (2024-25) ITR ?                 #  
+            #                                                                                    #
+            #------------------------------------------------------------------------------------#
+
+            previous_year_itr=self.data.get("previous_year_itr","2")
+            radio = self.driver.find_element(By.XPATH,f"//input[@value='{previous_year_itr}']")
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});",radio)
+            time.sleep(2)
+            radio.click()
     
             #--------------------------------------------------------------#
             #                                                              #  
@@ -418,17 +431,22 @@ class UdyamRegistration:
             #--------------------------------------------------------------#
     
     
-            # 🔹 Scroll to "Do you have GSTIN ?" text (center)
-            gst_label = self.wait.until(EC.presence_of_element_located((By.XPATH, "//b[contains(text(),'Do you have GSTIN')]")))
-            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", gst_label)
+            # # 🔹 Scroll to "Do you have GSTIN ?" text (center)
+            # gst_label = self.wait.until(EC.presence_of_element_located((By.XPATH, "//b[contains(text(),'Do you have GSTIN')]")))
+            # self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", gst_label)
     
-            # 🔹 Click "No" radio button (value=2)
-            gst_no = self.wait.until(EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_rblWhetherGstn_1")))
-            self.driver.execute_script("arguments[0].click();", gst_no)
-            self.service.add_log("GSTIN radio button clicked successfully")
-            time.sleep(1)
-    
-    
+            # # 🔹 Click "No" radio button (value=2)
+            # gst_no = self.wait.until(EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_rblWhetherGstn_1")))
+            # self.driver.execute_script("arguments[0].click();", gst_no)
+            # self.service.add_log("GSTIN radio button clicked successfully")
+            # time.sleep(1)
+
+            whether_gstn = self.data.get("whether_gstn","2")
+            gstn_radio = self.driver.find_element(By.XPATH,f"//table[@id='ctl00_ContentPlaceHolder1_rblWhetherGstn']//input[@value='{whether_gstn}']")
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});",gstn_radio)
+            time.sleep(2)
+            gstn_radio.click()
+       
     
             #--------------------------------------------------------------#
             #                                                              #
