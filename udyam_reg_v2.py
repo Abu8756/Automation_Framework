@@ -342,7 +342,8 @@ class UdyamRegistration:
             # 🔹 Fill PAN Number (letter by letter)
             pan_input = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtPan")))
             pan_input.clear()
-            for ch in self.data["pan_number"]:
+            pan_no=self.data["pan_number"]
+            for ch in pan_no:
                 pan_input.send_keys(ch)
                 time.sleep(0.1)
             time.sleep(1)
@@ -382,7 +383,7 @@ class UdyamRegistration:
                 message = error.text.strip()
 
                 if "You can not verify PAN more than 5 times in a day." in error.text:
-                    raise f"Already Five times used in the portal this pan number {self.data["pan_number"]},So You can not verify PAN more than 5 times in a day."
+                    raise f"Already Five times used in the portal this pan number {pan_no},So You can not verify PAN more than 5 times in a day."
                     # return {
                     #     "status": False,
                     #     "message": error.text.strip()
