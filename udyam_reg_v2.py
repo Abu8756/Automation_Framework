@@ -420,7 +420,7 @@ class UdyamRegistration:
             #------------------------------------------------------------------------------------#
 
             previous_year_itr=self.data.get("previous_year_itr","2")
-            radio = self.driver.find_element(By.XPATH,f"//input[@value='{previous_year_itr}']")
+            radio = self.driver.find_element(By.XPATH,f"//table[@id='ctl00_ContentPlaceHolder1_rblPreviousYearITR']//input[@value='{previous_year_itr}']")
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});",radio)
             time.sleep(2)
             radio.click()
