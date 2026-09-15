@@ -410,7 +410,7 @@ class UdyamRegistration:
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", continue_btn)
             self.driver.execute_script("arguments[0].click();", continue_btn)
             self.service.add_log("Continue button clicked successfully")
-            time.sleep(4)
+            time.sleep(5)
 
 
             #----------------------------------------------------------------------------------- #
@@ -419,11 +419,17 @@ class UdyamRegistration:
             #                                                                                    #
             #------------------------------------------------------------------------------------#
 
-            previous_year_itr=self.data.get("previous_year_itr","2")
+            previous_year_itr = self.data.get("previous_year_itr", "2")
             radio = self.driver.find_element(By.XPATH,f"//table[@id='ctl00_ContentPlaceHolder1_rblPreviousYearITR']//input[@value='{previous_year_itr}']")
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});",radio)
-            time.sleep(2)
+            time.sleep(3)
             radio.click()
+
+            # previous_year_itr=self.data.get("previous_year_itr","2") # ctl00_ContentPlaceHolder1_rblPreviousYearITR
+            # radio = self.driver.find_element(By.XPATH,f"//table[@id='ctl00_ContentPlaceHolder1_rblPreviousYearITR']//input[@value='{previous_year_itr}']")
+            # self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});",radio)
+            # time.sleep(2)
+            # radio.click()
     
             #--------------------------------------------------------------#
             #                                                              #  
