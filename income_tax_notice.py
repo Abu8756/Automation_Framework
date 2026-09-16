@@ -443,7 +443,7 @@ class IncomeTaxNotice:
         final_data = self._lowercase_keys(data)
 
         # OpenSearch URL
-        url = f"https://search-mcadata-qxusfuxizmpxkh4y34gzyp7gxa.ap-south-1.es.amazonaws.com/itr_notice/_doc/{pan}"
+        url = f"http://localhost:9200/itr_notice/_doc/{pan}"
 
         headers = {
             "Content-Type": "application/json"
@@ -601,12 +601,22 @@ class IncomeTaxNotice:
                     "file": document
                 })
 
-        final_data = {
-            "details": step3.get("response"),
-            "notices": notices_by_year,
-            "pan": pan,
-            "updated_on": datetime.now().isoformat(timespec="seconds")
-        }
+        # STEP-5
+        # Push the collected notice data into OpenSearch and hand back
+        # whatever OpenSearch responds with (push_itr_notice builds the
+        # final_data payload internally from step3/notices_by_year/pan).
+        print("STEP-5")
+        try:
+            es_response = self.push_itr_notice(step3, notices_by_year, pan)
+        except requests.exceptions.RequestException as exc:
+            return {
+                "status": "failed",
+                "status_code": 502,
+                "message": f"Failed to push notice data to OpenSearch: {exc}",
+            }
 
-        # normalize every key in the final payload to lowercase
-        return self._lowercase_keys(final_data)
+        return {
+            "status": "success",
+            "status_code": 200,
+            "response": es_response,
+        }
