@@ -2,6 +2,8 @@ import base64
 import requests
 import time
 import urllib3
+from datetime import datetime
+
 
 urllib3.disable_warnings(
     urllib3.exceptions.InsecureRequestWarning
@@ -418,6 +420,50 @@ class IncomeTaxNotice:
         }
 
     ########################################################
+    # PUSH NOTICE DATA TO OPENSEARCH
+    ########################################################
+
+    def push_itr_notice(self, step3, notices_by_year, pan):
+        """
+        Push the collected notice data for a PAN into OpenSearch.
+
+        step3: the response dict from save_entity(pan)
+        notices_by_year: the {assessment_year: [...]} map built in login()
+        pan: the PAN this document is keyed on
+        """
+
+        data = {
+            "details": step3.get("response"),
+            "notices": notices_by_year,
+            "pan": pan,
+            "updated_on": datetime.now().isoformat(timespec="seconds")
+        }
+
+        # Lowercase all keys (None values are left as-is)
+        final_data = self._lowercase_keys(data)
+
+        # OpenSearch URL
+        url = f"https://search-mcadata-qxusfuxizmpxkh4y34gzyp7gxa.ap-south-1.es.amazonaws.com/itr_notice/_doc/{pan}"
+
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        # POST data into OpenSearch
+        response = requests.post(
+            url,
+            headers=headers,
+            json=final_data,
+            timeout=30
+        )
+
+        # Raise error if request fails
+        response.raise_for_status()
+
+        # Return OpenSearch response
+        return response.json()
+
+    ########################################################
     # KEY NORMALIZATION HELPER
     ########################################################
 
@@ -556,10 +602,10 @@ class IncomeTaxNotice:
                 })
 
         final_data = {
-            "status": "success",
-            "status_code": 200,
             "details": step3.get("response"),
-            "notices": notices_by_year
+            "notices": notices_by_year,
+            "pan": pan,
+            "updated_on": datetime.now().isoformat(timespec="seconds")
         }
 
         # normalize every key in the final payload to lowercase
