@@ -85,6 +85,7 @@ class IncomeTaxNotice:
         if service_name:
             headers["sn"] = service_name
         print(headers)
+        print("Headers Services",headers["sn"])
         return headers
 
     ########################################################
@@ -105,8 +106,9 @@ class IncomeTaxNotice:
             headers=self._headers(service_name),
            json=payload,    timeout=30
         )
-
+        print("-"*10)
         print(r.text)
+        print("-"*10)
 
         try:
             data = r.json()
@@ -159,7 +161,7 @@ class IncomeTaxNotice:
         password64 = base64.b64encode(
             password.encode()
         ).decode()
-        print(pan,password64,reqId,entityType,role)
+        print("Details --->",pan,password64,reqId,entityType,role)
         payload = {
             "errors": [],
             "reqId": reqId,
@@ -197,7 +199,9 @@ class IncomeTaxNotice:
     timeout=30
 
         )
-        print(r.text)
+        # print("-"*10)
+        # print(r.text)
+        # print("-"*10)
 
         try:
             data = r.json()
@@ -251,7 +255,9 @@ class IncomeTaxNotice:
     timeout=30
 
         )
-        print(r.text)
+        # print("-"*10)
+        # print(r.text)
+        # print("-"*10)
 
         try:
             data = r.json()
@@ -329,7 +335,7 @@ class IncomeTaxNotice:
     timeout=30
 
         )
-        print(r.text)
+        # print(r.text)
         try:
             data = r.json()
         except ValueError:
