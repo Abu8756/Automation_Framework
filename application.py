@@ -132,7 +132,7 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
         "pattern": _ALPHA_ONLY_RE,
         "pattern_message": "'pan_name' must contain alphabetic characters only",
     },
-    "dob": {
+    "date_of_birth": {
         "type": str, "required": True,
         "normalize_date": True,  # accepts DD-MM-YYYY, YYYY-MM-DD, etc.
         "pattern": _DATE_DDMMYYYY_RE,
@@ -149,10 +149,10 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
         },
 
     # -------- Investment / Turnover --------
-    "wdv": {
+    "written_down_value": {
         "type": str, "required": True,
         "pattern": _NUMERIC_ONLY_RE,
-        "pattern_message": "'wdv' must be numeric only",
+        "pattern_message": "'written_down_value' must be numeric only",
     },
     "exclusion_cost": {
         "type": str, "required": True,
@@ -212,9 +212,9 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
         "type": str, "required": True,
         "extract_number": True,  # accepts "2" or "2-EM_II"
         "pattern": _SINGLE_DIGIT_RE,
-        "pattern_message": "'previous_em' must be a single numeric digit",
+        "pattern_message": "'em_ii_uam_no' must be a single numeric digit",
         "choices": PREVIOUS_EM_CHOICES,   # 1=N/A 2=EM-II 3=Previous UAM
-        "choices_message": f"'previous_em' must be one of: {', '.join(PREVIOUS_EM_CHOICES)}",
+        "choices_message": f"'em_ii_uam_no' must be one of: {', '.join(PREVIOUS_EM_CHOICES)}",
     },
     "previous_em_or_uam_no":  {"type": str, "required_if": {"field": "major_activity","equals": "2","equals": "3"}},
     "incorporation_date": {
@@ -241,8 +241,8 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
 
     # -------- Bank Details --------
     "bank_name":      {"type": str, "required": True},
-    "ifsc":           {"type": str, "required": True},
-    "account_number": {"type": str, "required": True},
+    "ifsc_code":           {"type": str, "required": True},
+    "bank_account_number": {"type": str, "required": True},
 
     # -------- Major Activity --------
     "major_activity": {

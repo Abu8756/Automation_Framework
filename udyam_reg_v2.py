@@ -348,7 +348,7 @@ class UdyamRegistration:
             # 🔹 Fill DOB / DOI (letter by letter format DD/MM/YYYY)
             dob_input = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtdob")))
             dob_input.clear()
-            for ch in self.data["dob"]:
+            for ch in self.data["date_of_birth"]:
                 dob_input.send_keys(ch)
                 time.sleep(0.1)
             time.sleep(1)
@@ -440,7 +440,7 @@ class UdyamRegistration:
             # self.service.add_log("GSTIN radio button clicked successfully")
             # time.sleep(1)
 
-            whether_gstn = self.data.get("whether_gstn","2")
+            whether_gstn = self.data.get("do_you_have_gstin","2")
             gstn_radio = self.driver.find_element(By.XPATH,f"//table[@id='ctl00_ContentPlaceHolder1_rblWhetherGstn']//input[@value='{whether_gstn}']")
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});",gstn_radio)
             time.sleep(2)
@@ -463,12 +463,12 @@ class UdyamRegistration:
             # 🔹 Fill Written Down Value (A)
             wdv_input = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtDepCost")))
             wdv_input.clear()
-            wdv_input.send_keys(self.data["wdv"])   # example: "200000.00"
+            wdv_input.send_keys(self.data.get("written_down_value","0"))   # example: "200000.00"
     
             # 🔹 Fill Exclusion Cost (B)
             ex_input = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtExCost")))
             ex_input.clear()
-            ex_input.send_keys(self.data["exclusion_cost"])   # example: "50000.00"
+            ex_input.send_keys(self.data.get("exclusion_cost","0"))   # example: "50000.00"
     
             # 🔹 Scroll to Turnover section
             turnover_section = self.wait.until(EC.presence_of_element_located((By.XPATH, "//b[contains(text(),'Total Turnover')]")))
@@ -478,7 +478,7 @@ class UdyamRegistration:
             # 🔹 Fill Total Turnover (A)
             turnover_input = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtTotalTurnoverA")))
             turnover_input.clear()
-            turnover_input.send_keys(self.data["total_turnover"])   # example: "300000.00"
+            turnover_input.send_keys(self.data.get("total_turnover","0"))   # example: "300000.00"
     
     
             # Click "Continue..." button (Enterprise Details)
@@ -733,14 +733,14 @@ class UdyamRegistration:
             # 🔹 IFSC Code (letter by letter)
             ifsc = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtifsccode")))
             ifsc.clear()
-            for ch in self.data["ifsc"]:
+            for ch in self.data["ifsc_code"]:
                 ifsc.send_keys(ch)
                 time.sleep(0.1)
     
             # 🔹 Account Number
             acc = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtaccountno")))
             acc.clear()
-            acc.send_keys(self.data["account_number"])
+            acc.send_keys(self.data["bank_account_number"])
             time.sleep(2)
             self.service.add_log("Bank Details filled successfully")
             self.service.set_progress(74)
