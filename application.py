@@ -114,8 +114,9 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
     },
 
     # -------- PAN Verification --------
-    "org_type": {
+    "organisation_type": {
         "type": str, "required": True,
+        "extract_number": True,  # accepts "2" or "2-Hindu Undivided Family"
         "pattern": _SINGLE_DIGIT_RE,
         "pattern_message": "'org_type' must be a single numeric digit",
         "choices": ORG_TYPE_CHOICES,
@@ -136,6 +137,15 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
         "pattern": _DATE_DDMMYYYY_RE,
         "pattern_message": "'dob' must be in DD/MM/YYYY format",
     },
+
+    "do_you_have_gstin": {
+            "type": str, "required": True,
+            "extract_number": True,  # accepts "1" or "1-Yes"
+            "pattern": _SINGLE_DIGIT_RE,
+            "pattern_message": "'do_you_have_gstin' must be a single numeric digit",
+            "choices": NIC_ACTIVITY_CHOICES,   # 0=N/A 2=EM-II 4=Previous UAM
+            "choices_message": f"'previous_em' must be one of: {', '.join(NIC_ACTIVITY_CHOICES)}",
+        },
 
     # -------- Investment / Turnover --------
     "wdv": {
@@ -168,6 +178,7 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
     },
     "social_category": {
         "type": str, "required": True,
+        "extract_number": True,  # accepts "1" or "1-General"
         "pattern": _SINGLE_DIGIT_RE,
         "pattern_message": "'social_category' must be a single numeric digit",
         "choices": SOCIAL_CATEGORY_CHOICES,   # 1=General 2=SC 3=ST 4=OBC
@@ -175,6 +186,7 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
     },
     "gender": {
         "type": str, "required": True,
+        "extract_number": True,  # accepts "1" or "1-Male"
         "pattern": _SINGLE_DIGIT_RE,
         "pattern_message": "'gender' must be a single numeric digit",
         "choices": GENDER_CHOICES,
@@ -182,6 +194,7 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
     },
     "divyang": {
         "type": str, "required": True,
+        "extract_number": True,  # accepts "0" or "0-No"
         "pattern": _SINGLE_DIGIT_RE,
         "pattern_message": "'divyang' must be a single numeric digit",
         "choices": DIVYANG_CHOICES,   # 0=No 1=Yes
@@ -194,24 +207,27 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
     "units": {"type": dict, "required": True, "each": _ADDRESS_SCHEMA},
 
     # -------- Status of Enterprise --------
-    "previous_em": {
+    "em_ii_uam_no": {
         "type": str, "required": True,
+        "extract_number": True,  # accepts "2" or "2-EM_II"
         "pattern": _SINGLE_DIGIT_RE,
         "pattern_message": "'previous_em' must be a single numeric digit",
-        "choices": PREVIOUS_EM_CHOICES,   # 0=N/A 2=EM-II 4=Previous UAM
+        "choices": PREVIOUS_EM_CHOICES,   # 1=N/A 2=EM-II 3=Previous UAM
         "choices_message": f"'previous_em' must be one of: {', '.join(PREVIOUS_EM_CHOICES)}",
     },
+    "previous_em_or_uam_no":  {"type": str, "required_if": {"field": "major_activity","equals": "2","equals": "3"}},
     "incorporation_date": {
         "type": str, "required": True,
         "pattern": _DATE_DDMMYYYY_RE,
         "pattern_message": "'incorporation_date' must be in DD/MM/YYYY format",
     },
-    "commenced": {
+    "commenced_operations": {
         "type": str, "required": True,
+        "extract_number": True,  # accepts "1" or "1-Yes"
         "pattern": _SINGLE_DIGIT_RE,
-        "pattern_message": "'commenced' must be a single numeric digit",
+        "pattern_message": "'commenced_operations' must be a single numeric digit",
         "choices": COMMENCED_CHOICES,   # 1=Yes 0=No
-        "choices_message": f"'commenced' must be one of: {', '.join(COMMENCED_CHOICES)}",
+        "choices_message": f"'commenced_operations' must be one of: {', '.join(COMMENCED_CHOICES)}",
     },
     # only required when commenced == "1"
     "commencement_date": {
@@ -228,6 +244,7 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
     # -------- Major Activity --------
     "major_activity": {
         "type": str, "required": True,
+        "extract_number": True,  # accepts "2" or "2-Services"
         "pattern": _SINGLE_DIGIT_RE,
         "pattern_message": "'major_activity' must be a single numeric digit",
         "choices": MAJOR_ACTIVITY_CHOICES,   # 1=Manufacturing 2=Services
@@ -235,54 +252,56 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
     },
     "major_activity_under_services": {
         "type": str, "required_if": {"field": "major_activity", "equals": "2"},
+        "extract_number": True,  # accepts "1" or "1-Non-Trading"
         "pattern": _SINGLE_DIGIT_RE,
         "pattern_message": "'major_activity_under_services' must be a single numeric digit",
         "choices": MAJOR_ACTIVITY_UNDER_SERVICES_CHOICES,
         "choices_message": f"'major_activity_under_services' must be one of: {', '.join(MAJOR_ACTIVITY_UNDER_SERVICES_CHOICES)}",
     },
+    #-------------- Nic Activity ---------
     "nic_activity": {
         "type": str, "required": True,
+        "extract_number": True,  # accepts "2" or "2-Services"
         "pattern": _NUMERIC_ONLY_RE,
         "pattern_message": "'nic_activity' must be numeric only",
         "choices": NIC_ACTIVITY_CHOICES,
         "choices_message": f"'nic_activity' must be one of: {', '.join(NIC_ACTIVITY_CHOICES)}",
     },
-    "nic": {"type": dict, "required": True, "schema": {
-        "nic2": {
-            "type": str, "required": True,
-            "pattern": _NUMERIC_ONLY_RE,
-            "pattern_message": "'nic2' must be numeric only",
-        },
-        "nic4": {
-            "type": str, "required": True,
-            "pattern": _NUMERIC_ONLY_RE,
-            "pattern_message": "'nic4' must be numeric only",
-        },
-        "nic5": {
-            "type": str, "required": True,
-            "pattern": _NUMERIC_ONLY_RE,
-            "pattern_message": "'nic5' must be numeric only",
-        },
-    }},
-
+    "nic_2_digit_code": {
+        "type": str, "required": True,
+        "extract_number": True,  # accepts "56" or "51-Air Transport"
+        "pattern": _NUMERIC_ONLY_RE,
+        "pattern_message": "'nic2' must be numeric only",
+    },
+    "nic_4_digit_code": {
+        "type": str, "required": True,
+        "extract_number": True,  # accepts "5610" or "5120-Freight air transport"
+        "pattern": _NUMERIC_ONLY_RE,
+        "pattern_message": "'nic4' must be numeric only",
+    },
+    "nic_5_digit_code": {
+        "type": str, "required": True,
+        "extract_number": True,  # accepts "56101" or "51202-Launching of..."
+        "pattern": _NUMERIC_ONLY_RE,
+        "pattern_message": "'nic5' must be numeric only",
+    },
+    
     # -------- Employees --------
-    "employees": {"type": dict, "required": True, "schema": {
-        "male": {
-            "type": str, "required": True,
-            "pattern": _NUMERIC_ONLY_RE,
-            "pattern_message": "'male' must be numeric only",
-        },
-        "female": {
-            "type": str, "required": True,
-            "pattern": _NUMERIC_ONLY_RE,
-            "pattern_message": "'female' must be numeric only",
-        },
-        "others": {
-            "type": str, "required": True,
-            "pattern": _NUMERIC_ONLY_RE,
-            "pattern_message": "'others' must be numeric only",
-        },
-    }},
+    "male_employees": {
+        "type": str, "required": True,
+        "pattern": _NUMERIC_ONLY_RE,
+        "pattern_message": "'male' must be numeric only",
+    },
+    "female_employees": {
+        "type": str, "required": True,
+        "pattern": _NUMERIC_ONLY_RE,
+        "pattern_message": "'female' must be numeric only",
+    },
+    "others": {
+        "type": str, "required": True,
+        "pattern": _NUMERIC_ONLY_RE,
+        "pattern_message": "'others' must be numeric only",
+    }
 })
 class UdyamRegService(AutomationService):
     def run(self, data):

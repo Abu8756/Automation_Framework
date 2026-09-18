@@ -20,7 +20,9 @@ import traceback
 import uuid
 import datetime
 
-from flask import Flask, request, jsonify
+import base64
+
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
 def _now() -> str:
@@ -126,6 +128,25 @@ def check_date_range(value_str: str, rules: dict, full_name: str):
 # CENTRALIZED / REUSABLE JSON OPTIONS HELPERS
 # ============================================================
 
+# Matches a value shaped like "2-Hindu Undivided Family", "51-Air Transport",
+# "1-Yes", etc: leading digits, then a "-", then a human-readable label.
+# Used by the `extract_number` schema rule below so a field can accept
+# EITHER a bare code ("2") OR a "code-label" string and still be validated
+# (and stored) as just the code.
+_LEADING_NUMBER_RE = re.compile(r"^(\d+)\s*-\s*.+$")
+
+
+def extract_leading_number(value):
+    """If value looks like '<digits>-<label>', return just the '<digits>'
+    part. Otherwise return value unchanged. Safe to call on any value —
+    non-strings and plain numeric strings pass through untouched."""
+    if isinstance(value, str):
+        match = _LEADING_NUMBER_RE.match(value.strip())
+        if match:
+            return match.group(1)
+    return value
+
+
 def json_top_level_keys(options: dict) -> list:
     """Return the top-level keys of an options dict, e.g. {"1": {...}, "2": {...}} -> ["1", "2"]."""
     return list(options.keys()) if isinstance(options, dict) else []
@@ -153,7 +174,8 @@ def json_build_choice_map(options: dict, group_key: str = "sub", value_key: str 
 
 class AutomationFramework:
 
-    def __init__(self, name: str = __name__, log_path: str = "logs/sessions.log", port: int = 3333):
+    def __init__(self, name: str = __name__, log_path: str = "logs/sessions.log", port: int = 3333,
+                 screenshot_dir: str = "logs/screenshots"):
         self.app = Flask(name)
         self.port = port
         CORS(
@@ -176,6 +198,12 @@ class AutomationFramework:
         directory = os.path.dirname(log_path)
         if directory:
             os.makedirs(directory, exist_ok=True)
+
+        # Where error/step screenshots handed to add_log(..., screenshot=...)
+        # get saved as PNG files, so log entries can reference them by name
+        # instead of embedding a giant base64 blob in every log line.
+        self.screenshot_dir = screenshot_dir
+        os.makedirs(self.screenshot_dir, exist_ok=True)
 
         self._register_global_routes()
 
@@ -204,7 +232,29 @@ class AutomationFramework:
 
         return decorator
 
-    def _write_log_file(self, service: str, session_id: str, level: str, message: str, kind: str):
+    def _save_screenshot(self, session_id: str, screenshot) -> str:
+        """Decode a base64 (or raw bytes) screenshot and save it under
+        self.screenshot_dir. Returns the saved file's name (not full path),
+        or None if `screenshot` couldn't be saved. Accepts either a data
+        URI ("data:image/png;base64,....") or a bare base64 string."""
+        if not screenshot:
+            return None
+        try:
+            if isinstance(screenshot, bytes):
+                raw = screenshot
+            else:
+                b64_data = screenshot.split(",", 1)[1] if screenshot.startswith("data:") else screenshot
+                raw = base64.b64decode(b64_data)
+            filename = f"{session_id}_{uuid.uuid4().hex[:8]}.png"
+            with open(os.path.join(self.screenshot_dir, filename), "wb") as f:
+                f.write(raw)
+            return filename
+        except Exception:
+            traceback.print_exc()
+            return None
+
+    def _write_log_file(self, service: str, session_id: str, level: str, message: str, kind: str,
+                         screenshot_filename: str = None):
         entry = {
             "time": _now(),
             "service": service,
@@ -213,6 +263,8 @@ class AutomationFramework:
             "kind": kind,
             "message": message,
         }
+        if screenshot_filename:
+            entry["screenshot"] = f"/screenshots/{screenshot_filename}"
         with self._lock:
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -233,16 +285,28 @@ class AutomationFramework:
                         continue
         return results
 
-    def add_log(self, session_id: str, message: str, level: str = "INFO", kind: str = None):
+    def add_log(self, session_id: str, message: str, level: str = "INFO", kind: str = None, screenshot=None):
+        """screenshot (optional): a base64-encoded PNG (bare string or a
+        "data:image/png;base64,..." URI) or raw PNG bytes, e.g. from
+        Selenium's driver.get_screenshot_as_base64(). When given, it's
+        saved to disk under screenshot_dir and this log entry gets a
+        "screenshot" field with the URL to fetch it — so it comes back
+        automatically from GET-able logs and from /<service>/status when
+        called with {"view": "logs", "session_id": ...}."""
 
         if kind is None:
             kind = "otp" if "otp" in message.lower() else "status"
+
+        screenshot_filename = self._save_screenshot(session_id, screenshot) if screenshot else None
 
         with self._lock:
             session = self.sessions.get(session_id)
             if not session:
                 return
-            session["logs"].append({"time": _now(), "message": message, "level": level, "kind": kind})
+            entry = {"time": _now(), "message": message, "level": level, "kind": kind}
+            if screenshot_filename:
+                entry["screenshot"] = f"/screenshots/{screenshot_filename}"
+            session["logs"].append(entry)
             session["status"] = message
             session["updated_at"] = _now()
             if kind == "otp":
@@ -250,7 +314,7 @@ class AutomationFramework:
             else:
                 session["status_hits"] = session.get("status_hits", 0) + 1
             service_name = session["service"]
-        self._write_log_file(service_name, session_id, level, message, kind)
+        self._write_log_file(service_name, session_id, level, message, kind, screenshot_filename=screenshot_filename)
 
     def _session_hit_summary(self, session_id: str, session: dict) -> dict:
 
@@ -360,6 +424,15 @@ class AutomationFramework:
                 if required:
                     errors.append(f"'{full_name}' is required")
                 continue
+
+            # -------- accept "<code>-<label>" and reduce it to "<code>" --------
+            # e.g. "2-Hindu Undivided Family" -> "2", "51-Air Transport" -> "51".
+            # Normalizes `data[field]` in place so every check below (type,
+            # pattern, choices) — and whatever the service does with `data`
+            # afterwards — only ever sees the plain code.
+            if rules.get("extract_number"):
+                value = extract_leading_number(value)
+                data[field] = value
 
             if expected_type and not isinstance(value, expected_type):
                 errors.append(f"'{full_name}' must be of type {expected_type.__name__}")
@@ -547,7 +620,18 @@ class AutomationFramework:
             except Exception as e:
                 traceback.print_exc()
                 self.set_error(session_id, str(e))
-                self.add_log(session_id, f"Error: {str(e)}", level="ERROR")
+                # If the service exposes a live Selenium `driver` attribute,
+                # grab one last screenshot automatically so the failure shows
+                # up visually in /<service>/status {"view": "logs"} even if
+                # the service itself never called capture_screenshot().
+                screenshot = None
+                driver = getattr(locals().get("instance"), "driver", None)
+                if driver is not None:
+                    try:
+                        screenshot = driver.get_screenshot_as_base64()
+                    except Exception:
+                        screenshot = None
+                self.add_log(session_id, f"Error: {str(e)}", level="ERROR", screenshot=screenshot)
             finally:
                 # free up the unique key regardless of success/failure so a
                 # later /start for the same PAN/username isn't blocked forever
@@ -724,6 +808,10 @@ class AutomationFramework:
     # ------------------------------------------------------------------
     def _register_global_routes(self):
 
+        @self.app.route("/screenshots/<path:filename>", methods=["GET"])
+        def get_screenshot(filename):
+            return send_from_directory(self.screenshot_dir, filename)
+
         @self.app.route("/services", methods=["GET"])
         def list_services():
             return jsonify({
@@ -786,8 +874,24 @@ class AutomationService:
         self.framework = framework
         self.data = data
 
-    def add_log(self, message: str, level: str = "INFO"):
-        self.framework.add_log(self.session_id, message, level=level)
+    def add_log(self, message: str, level: str = "INFO", screenshot=None):
+        self.framework.add_log(self.session_id, message, level=level, screenshot=screenshot)
+
+    def capture_screenshot(self, driver, message: str = "Error screenshot captured", level: str = "ERROR"):
+        """Convenience for services using Selenium: grab the current page as
+        a screenshot and attach it to a log entry in one call, e.g. from an
+        except block:
+            except Exception as e:
+                self.capture_screenshot(driver, f"Failed at step X: {e}")
+                raise
+        The screenshot will then be returned by /<service>/status when
+        called with {"view": "logs", "session_id": self.session_id}."""
+        try:
+            b64 = driver.get_screenshot_as_base64()
+        except Exception:
+            self.add_log(f"{message} (screenshot capture failed)", level=level)
+            return
+        self.add_log(message, level=level, screenshot=b64)
 
     def set_progress(self, progress: int):
         self.framework.set_progress(self.session_id, progress)

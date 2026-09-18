@@ -14,9 +14,9 @@
 # "Trust": "11"
 # ----------------------------------------
 # gst_map in json
-# "Yes": "0",
-# "No": "1",
-# "Exempted": "2"
+# "Yes": "1",
+# "No": "2",
+# "Exempted": "3"
 # ----------------------------------------
 # category_map in json
 # "General": "0",
@@ -62,9 +62,7 @@ import cv2
 import easyocr
 import numpy as np
 
-# Folder setup
-captcha_folder = "UDYAM_CAPTCHA"
-os.makedirs(captcha_folder, exist_ok=True)
+
 # -----------------------------
 # Function to handle alert popup
 # -----------------------------
@@ -127,12 +125,6 @@ class UdyamRegistration:
 
     def __init__(self, data, service):
         self.data = data
-        # `service` is the UdyamRegService (AutomationService) instance that
-        # created this run. It is the ONLY place session state, progress,
-        # logging, error/result storage, and OTP storage live — this class
-        # holds none of that itself, it just calls back into the framework
-        # through this object (same pattern as Startup_india in
-        # startup_india.py).
         self.service = service
         self.session_id = service.session_id  # read-only, handy for log text
         self.driver = None
@@ -331,7 +323,7 @@ class UdyamRegistration:
             time.sleep(1)
     
             # 🔹 Select Type of Organisation (dynamic input: 1,2,3...)
-            org_value = str(self.data["org_type"])   # example: 1 / 2 / 3
+            org_value = str(self.data["organisation_type"])   # example: 1 / 2 / 3
     
             org_dropdown = self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddlTypeofOrg")))
             # Select(org_dropdown).select_by_value(org_value)
@@ -419,11 +411,11 @@ class UdyamRegistration:
             #                                                                                    #
             #------------------------------------------------------------------------------------#
 
-            previous_year_itr = self.data.get("previous_year_itr", "2")
-            radio = self.driver.find_element(By.XPATH,f"//table[@id='ctl00_ContentPlaceHolder1_rblPreviousYearITR']//input[@value='{previous_year_itr}']")
-            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});",radio)
-            time.sleep(3)
-            radio.click()
+            # previous_year_itr = self.data.get("previous_year_itr", "2")
+            # radio = self.driver.find_element(By.XPATH,f"//table[@id='ctl00_ContentPlaceHolder1_rblPreviousYearITR']//input[@value='{previous_year_itr}']")
+            # self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});",radio)
+            # time.sleep(3)
+            # radio.click()
 
             # previous_year_itr=self.data.get("previous_year_itr","2") # ctl00_ContentPlaceHolder1_rblPreviousYearITR
             # radio = self.driver.find_element(By.XPATH,f"//table[@id='ctl00_ContentPlaceHolder1_rblPreviousYearITR']//input[@value='{previous_year_itr}']")
@@ -667,15 +659,15 @@ class UdyamRegistration:
             options = self.driver.find_elements(By.NAME, "ctl00$ContentPlaceHolder1$rdbPreviousEM")
     
             for opt in options:
-                if opt.get_attribute("value") == str(self.data["previous_em"]):
+                if opt.get_attribute("value") == str(self.data["em_ii_uam_no"]):
                     self.driver.execute_script("arguments[0].click();", opt)
                     break
 
 
             time.sleep(5)
 
-            previous_type = int(self.data["previous_em"])
-            previous_number = self.data.get("previous_em_no",0)
+            previous_type = int(self.data["em_ii_uam_no"])
+            previous_number = self.data.get("previous_em_or_uam_no",0)
             if previous_type == 2:
                 # EM-II
                 self.driver.find_element(By.ID,"ctl00_ContentPlaceHolder1_txtPreviousNumber").send_keys(previous_number)
@@ -708,7 +700,7 @@ class UdyamRegistration:
             # 🔹 Select Commenced (1=Yes, 0=No)
             options = self.driver.find_elements(By.NAME, "ctl00$ContentPlaceHolder1$rblcommenced")
             for opt in options:
-                if opt.get_attribute("value") == str(self.data["commenced"]):
+                if opt.get_attribute("value") == str(self.data["commenced_operations"]):
                     self.driver.execute_script("arguments[0].click();", opt)
                     break
     
@@ -823,27 +815,27 @@ class UdyamRegistration:
             time.sleep(3)
             nic2 = Select(nic2_ele)
             
-            nic2.select_by_value(self.data["nic"]["nic2"])
+            nic2.select_by_value(self.data["nic_2_digit_code"])
             self.wait_loader_loop()
             time.sleep(4)
     
             # 🔹 Select NIC 4 Digit
-            print("NIC 4 ---> ",self.data["nic"]["nic4"])
+            print("NIC 4 ---> ",self.data["nic_4_digit_code"])
             nic4_ele=self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl4NicCode")))
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic4_ele)
             time.sleep(3)
             nic4 = Select(nic4_ele)
-            nic4.select_by_value(self.data["nic"]["nic4"])
+            nic4.select_by_value(self.data["nic_4_digit_code"])
             self.wait_loader_loop()
             time.sleep(4)
     
             # 🔹 Select NIC 5 Digit
-            print("NIC 5 ---> ",self.data["nic"]["nic5"])
+            print("NIC 5 ---> ",self.data["nic_5_digit_code"])
             nic5_ele=self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl5NicCode")))
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic5_ele)
             time.sleep(3)
             nic5 = Select(nic5_ele)
-            nic5.select_by_value(self.data["nic"]["nic5"])
+            nic5.select_by_value(self.data["nic_5_digit_code"])
             self.wait_loader_loop()
             time.sleep(4)
     
@@ -893,13 +885,13 @@ class UdyamRegistration:
             others.clear()
     
             # Type slowly (simulate real user)
-            male.send_keys(str(self.data["employees"]["male"]))
+            male.send_keys(str(self.data["male_employees"]))
             time.sleep(0.3)
     
-            female.send_keys(str(self.data["employees"]["female"]))
+            female.send_keys(str(self.data["female_employees"]))
             time.sleep(0.3)
     
-            others.send_keys(str(self.data["employees"]["others"]))
+            others.send_keys(str(self.data["others"]))
             time.sleep(0.3)
     
             # Trigger JS
