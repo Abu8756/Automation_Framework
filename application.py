@@ -134,6 +134,7 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
     },
     "dob": {
         "type": str, "required": True,
+        "normalize_date": True,  # accepts DD-MM-YYYY, YYYY-MM-DD, etc.
         "pattern": _DATE_DDMMYYYY_RE,
         "pattern_message": "'dob' must be in DD/MM/YYYY format",
     },
@@ -218,6 +219,7 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
     "previous_em_or_uam_no":  {"type": str, "required_if": {"field": "major_activity","equals": "2","equals": "3"}},
     "incorporation_date": {
         "type": str, "required": True,
+        "normalize_date": True,  # accepts DD-MM-YYYY, YYYY-MM-DD, etc.
         "pattern": _DATE_DDMMYYYY_RE,
         "pattern_message": "'incorporation_date' must be in DD/MM/YYYY format",
     },
@@ -232,6 +234,7 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
     # only required when commenced == "1"
     "commencement_date": {
         "type": str, "required_if": {"field": "commenced", "equals": "1"},
+        "normalize_date": True,  # accepts DD-MM-YYYY, YYYY-MM-DD, etc.
         "pattern": _DATE_DDMMYYYY_RE,
         "pattern_message": "'commencement_date' must be in DD/MM/YYYY format",
     },
@@ -406,6 +409,7 @@ CATEGORY_SUB_TYPE_MAP = json_build_choice_map(CATEGORY_OPTIONS)                #
 
     "date_of_commencement": {
         "type": str, "required": True,
+        "normalize_date": True,  # accepts DD-MM-YYYY, YYYY-MM-DD, etc.
         "pattern": _DATE_DDMMYYYY_RE,
         "pattern_message": "'Date_of_commencement' must be in DD/MM/YYYY format",
     },
@@ -551,6 +555,7 @@ _DIRECTOR_SCHEMA = {
     },
     "Dob": {
         "type": str, "required": True,
+        "normalize_date": True,  # accepts DD-MM-YYYY, YYYY-MM-DD, etc.
         "pattern": _DATE_DDMMYYYY_RE,
         "pattern_message": "director 'Dob' must be in DD/MM/YYYY format",
     },
@@ -640,11 +645,13 @@ _EPFO_MEMBER_SCHEMA = {
     },
     "dob": {
         "type": str, "required": True,
+        "normalize_date": True,  # accepts DD-MM-YYYY, YYYY-MM-DD, etc.
         "pattern": _DATE_DDMMYYYY_RE,
         "pattern_message": "member 'dob' must be in DD/MM/YYYY format",
     },
     "doj": {
         "type": str, "required": True,
+        "normalize_date": True,  # accepts DD-MM-YYYY, YYYY-MM-DD, etc.
         "pattern": _DATE_DDMMYYYY_RE,
         "pattern_message": "member 'doj' must be in DD/MM/YYYY format",
     },

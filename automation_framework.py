@@ -147,6 +147,50 @@ def extract_leading_number(value):
     return value
 
 
+# ============================================================
+# DATE FORMAT AUTO-DETECTION / NORMALIZATION
+# ============================================================
+# Some upstream callers send dates as DD-MM-YYYY, YYYY-MM-DD (ISO),
+# DD.MM.YYYY, etc. instead of the DD/MM/YYYY every date field here expects.
+# Rather than reject those payloads, a field can opt in to auto-detecting
+# whichever of the formats below it matches and rewriting it to the target
+# format (DD/MM/YYYY by default) before the regular `pattern` check runs.
+#
+# Tried in this order — most specific/unambiguous first. "%m/%d/%Y" (US
+# month-first) is deliberately last and only ever matches when nothing
+# more specific does, since "05/06/2024" is inherently ambiguous between
+# DD/MM and MM/DD; every portal here is DD/MM, so that's favored.
+_DATE_INPUT_FORMATS = [
+    "%d/%m/%Y",
+    "%d-%m-%Y",
+    "%d.%m.%Y",
+    "%Y-%m-%d",   # ISO 8601, e.g. "2026-09-03"
+    "%Y/%m/%d",
+    "%d %b %Y",   # "24 Jul 1986"
+    "%d %B %Y",   # "24 July 1986"
+    "%m/%d/%Y",   # last resort, US-style month-first
+]
+
+
+def normalize_date(value, output_format: str = "%d/%m/%Y", input_formats=None):
+    """Try each format in `input_formats` (default _DATE_INPUT_FORMATS)
+    against `value` and, on the first match, return it re-formatted as
+    `output_format`. If nothing matches (or value isn't a string), `value`
+    is returned unchanged — so an unrecognized/garbage date still reaches
+    the normal `pattern` check and produces its usual clear error instead
+    of failing silently here."""
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    for fmt in (input_formats or _DATE_INPUT_FORMATS):
+        try:
+            parsed = datetime.datetime.strptime(stripped, fmt)
+        except ValueError:
+            continue
+        return parsed.strftime(output_format)
+    return value
+
+
 def json_top_level_keys(options: dict) -> list:
     """Return the top-level keys of an options dict, e.g. {"1": {...}, "2": {...}} -> ["1", "2"]."""
     return list(options.keys()) if isinstance(options, dict) else []
@@ -432,6 +476,20 @@ class AutomationFramework:
             # afterwards — only ever sees the plain code.
             if rules.get("extract_number"):
                 value = extract_leading_number(value)
+                data[field] = value
+
+            # -------- auto-detect the incoming date format and rewrite it --------
+            # e.g. "24-07-1986" or "2026-09-03" -> "24/07/1986" / "03/09/2026",
+            # so a field can declare "pattern": _DATE_DDMMYYYY_RE and still
+            # accept whichever common date format the caller actually sent.
+            # Override the target with "date_format" and/or the formats tried
+            # with "date_input_formats" (both already used by date_range).
+            if rules.get("normalize_date"):
+                value = normalize_date(
+                    value,
+                    output_format=rules.get("date_format", "%d/%m/%Y"),
+                    input_formats=rules.get("date_input_formats"),
+                )
                 data[field] = value
 
             if expected_type and not isinstance(value, expected_type):
