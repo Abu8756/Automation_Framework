@@ -683,18 +683,7 @@ _EPFO_MEMBER_SCHEMA = {
     },
 }
 
-# EPFO's UAN member portal has no OTP step in the onboarding flow itself,
-# so this service is registered with needs_otp=False — /epfo/otp is never
-# wired up and returns a plain 404 instead of a route that does nothing.
-#
-# Flow: POST /epfo/start (user_name/password/company_name) logs in ONCE
-# and returns a session_id. From then on, POST /epfo/member with that
-# session_id + one "member" object inserts a single member, reusing the
-# same already-logged-in portal session — call it as many times as you
-# have members, in as many separate requests as you like. POST
-# /epfo/status with that session_id shows the running list of members
-# processed so far (or the full log trail with {"view": "logs"}).
-@framework.service("epfo", needs_otp=False, schema={
+_EPFO_LOGIN_SCHEMA = {
     "user_name": {
         "type": str, "required": True,
         "pattern": _EPFO_USERNAME_RE,
@@ -702,6 +691,38 @@ _EPFO_MEMBER_SCHEMA = {
     },
     "password": {"type": str, "required": True},
     "company_name": {"type": str, "required": True},
+}
+
+# EPFO's UAN member portal has no OTP step in the onboarding flow itself,
+# so this service is registered with needs_otp=False — /epfo/otp is never
+# wired up and returns a plain 404 instead of a route that does nothing.
+#
+# Three entry points, all async (POST -> 202 + session_id, poll with that
+# session_id via POST /epfo/status):
+#
+#   POST /epfo/start  {user_name, password, company_name, member: [...]}
+#       Logs in, then — if "member" (a list) was included — processes
+#       every member in it right away, in that same call.
+#
+#   POST /epfo/login  {user_name, password, company_name}
+#       Logs in only, with no member batch. Use this when you'd rather
+#       add members one at a time afterwards via /epfo/member, or don't
+#       have any members ready yet.
+#
+#   POST /epfo/member {session_id, member: {...}}
+#       Inserts ONE member, reusing whichever of the two logins above is
+#       still live for that session_id — call it as many times as you
+#       have members, in as many separate requests as you like, whether
+#       or not /epfo/start's own batch was used.
+#
+# POST /epfo/status with a session_id shows the running list of members
+# processed so far (or the full log trail with {"view": "logs"}).
+@framework.service("epfo", needs_otp=False, schema={
+    **_EPFO_LOGIN_SCHEMA,
+    "member": {
+        "type": list, "required": False,
+        "items": _EPFO_MEMBER_SCHEMA,
+    },
 })
 class EPFOService(AutomationService):
     def run(self, data):
@@ -713,7 +734,32 @@ class EPFOService(AutomationService):
 
         # Keep the live, already-logged-in EPFOOnboarding (and its portal
         # session) alive in memory under this session_id, so /epfo/member
-        # can reuse it later instead of logging in again for every member.
+        # can reuse it later instead of logging in again for every member —
+        # regardless of whether an initial batch is processed below.
+        self.set_resource(obj)
+
+        members = data.get("member") or []
+        if not members:
+            return result
+
+        # An initial batch of members was included right alongside
+        # /epfo/start — process all of them now, reusing the same obj
+        # /epfo/member would otherwise reuse one member at a time.
+        self.add_log(f"Processing {len(members)} member(s) included with /epfo/start")
+        results = [obj.add_member(member) for member in members]
+
+        return {"status": "logged_in", "company": data.get("company_name"), "members": results}
+
+    @action("login", creates_session=True, schema=_EPFO_LOGIN_SCHEMA)
+    def login(self, data):
+        from epfo import EPFOOnboarding
+
+        self.add_log("Launching EPFO login")
+        obj = EPFOOnboarding(data=data, service=self)
+        result = obj.login()
+
+        # Same as /epfo/start: keep the live, logged-in EPFOOnboarding
+        # around under this (new) session_id so /epfo/member can reuse it.
         self.set_resource(obj)
         return result
 
@@ -725,7 +771,7 @@ class EPFOService(AutomationService):
         if obj is None:
             return {
                 "error": "No active EPFO login for this session_id. "
-                         "Call /epfo/start first (or it may have expired — start again).",
+                         "Call /epfo/start or /epfo/login first (or it may have expired — log in again).",
             }, 409
 
         result = obj.add_member(data["member"])

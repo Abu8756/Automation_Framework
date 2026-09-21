@@ -255,12 +255,42 @@ def json_build_choice_map(options: dict, group_key: str = "sub", value_key: str 
 # Any exception raised inside is caught, logged to the session, and
 # turned into a {"error": ...}, 500 response -- an action never needs its
 # own try/except just to keep the server alive.
-def action(name: str = None, methods=None, schema: dict = None):
+#
+# -------- creates_session=True: a second "/start" for the same service --------
+# By default an @action reuses an EXISTING session -- the caller must send
+# a session_id from an earlier /<name>/start, and the action 404s if it's
+# missing. Passing creates_session=True flips that: the action gets its
+# OWN fresh session instead (no session_id in the request body), runs the
+# decorated method in a background thread exactly like /start runs run(),
+# and immediately responds 202 with a new session_id for the caller to
+# poll via /<name>/status -- the same async contract as /start.
+#
+# This is for a service that needs more than one distinct "create a new
+# session" entry point, e.g. EPFO:
+#   /epfo/start  -> run(): logs in, and (optionally) processes an initial
+#                   batch of members passed right alongside the login
+#   /epfo/login  -> an action with creates_session=True: logs in only
+#   /epfo/member -> a normal action: adds one member to whichever of the
+#                   two sessions above is still live, reusing its login
+#
+#   @action("login", creates_session=True, schema={"user_name": {...}, ...})
+#   def login(self, data):
+#       obj = EPFOOnboarding(data=data, service=self)
+#       result = obj.login()
+#       self.set_resource(obj)      # keep it alive for /epfo/member
+#       return result
+#
+# `schema` (if given) validates the request body itself, the same as the
+# service's own PAYLOAD_SCHEMA does for /start -- there's no session yet
+# to inherit a payload from. A service registered with unique_key=... gets
+# the same "already running" 409 dedup /start gives, keyed the same way.
+def action(name: str = None, methods=None, schema: dict = None, creates_session: bool = False):
     def decorator(func):
         func._is_action = True
         func._action_name = name or func.__name__
         func._action_methods = methods or ["POST"]
         func._action_schema = schema
+        func._action_creates_session = creates_session
         return func
     return decorator
 
@@ -785,6 +815,48 @@ class AutomationFramework:
         threading.Thread(target=worker, daemon=True).start()
 
     # ------------------------------------------------------------------
+    # Same as _run_in_background above, but for a creates_session=True
+    # @action instead of run() -- used by e.g. /epfo/login. Identical
+    # worker shape (build instance, call it, set_result/set_error,
+    # auto-screenshot-on-failure, release any unique_key), just calling
+    # func(instance, data) instead of instance.run(data).
+    # ------------------------------------------------------------------
+    def _run_action_in_background(self, service_cls, func, action_name: str, session_id: str, data: dict):
+        unique_key = getattr(service_cls, "UNIQUE_KEY", None)
+        key_value = data.get(unique_key) if unique_key else None
+
+        def worker():
+            try:
+                self.add_log(session_id, f"Automation started ('{action_name}')")
+                instance = service_cls(session_id=session_id, framework=self, data=data)
+                result = func(instance, data)
+                # An action method may return (dict, status_int) the way a
+                # normal (session-reusing) action can -- for a background
+                # job there's no synchronous HTTP response to attach that
+                # status code to, so just keep the dict; the caller reads
+                # outcome/errors from the dict itself via /<name>/status.
+                if isinstance(result, tuple):
+                    result = result[0]
+                self.set_result(session_id, result)
+                self.set_progress(session_id, 100)
+                self.add_log(session_id, "Automation completed")
+            except Exception as e:
+                traceback.print_exc()
+                self.set_error(session_id, str(e))
+                screenshot = None
+                driver = getattr(locals().get("instance"), "driver", None)
+                if driver is not None:
+                    try:
+                        screenshot = driver.get_screenshot_as_base64()
+                    except Exception:
+                        screenshot = None
+                self.add_log(session_id, f"Error in '{action_name}': {e}", level="ERROR", screenshot=screenshot)
+            finally:
+                self._release_active_key(service_cls.SERVICE_NAME, key_value)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ------------------------------------------------------------------
     # Per-service routes: /<name>/start /status /otp /delete /logs
     # ------------------------------------------------------------------
     def _register_service_routes(self, name: str, cls):
@@ -971,46 +1043,87 @@ class AutomationFramework:
         action_name = func._action_name
         methods = func._action_methods
         schema = func._action_schema
+        creates_session = getattr(func, "_action_creates_session", False)
 
-        def handler():
-            data = request.get_json(silent=True)
-            if data is None:
-                return jsonify({"error": "Missing JSON payload"}), 400
+        if creates_session:
+            # Same shape as _register_service_routes()'s start() closure:
+            # no session_id yet (this call makes one), validate the body
+            # against this action's own schema, honor unique_key dedup the
+            # same way /start does, then hand off to the background worker
+            # and respond 202 immediately -- the caller polls
+            # /<name>/status with the returned session_id, exactly like
+            # after a normal /start.
+            def handler():
+                data = request.get_json(silent=True)
+                if data is None:
+                    return jsonify({"error": "Missing JSON payload"}), 400
 
-            session_id = data.get("session_id")
-            if not session_id:
-                return jsonify({"error": "'session_id' is required in the request body"}), 400
+                if schema:
+                    data = self.apply_defaults(data, schema)
+                    errors = self.validate(data, schema)
+                    if errors:
+                        return jsonify({"error": "Payload validation failed", "details": errors}), 422
 
-            with self._lock:
-                session = self.sessions.get(session_id)
-                session = dict(session) if session else None
-            if session is None or session.get("service") != name:
-                return jsonify({"error": "Session not found"}), 404
-            payload = dict(session.get("payload") or {})
+                unique_key = getattr(cls, "UNIQUE_KEY", None)
+                key_value = data.get(unique_key) if unique_key else None
 
-            if schema:
-                data = self.apply_defaults(data, schema)
-                errors = self.validate(data, schema)
-                if errors:
-                    return jsonify({"error": "Payload validation failed", "details": errors}), 422
+                if unique_key:
+                    existing_session_id = self._active_session_for_key(name, key_value)
+                    if existing_session_id:
+                        return jsonify({
+                            "service": name,
+                            "status": "already_running",
+                            "message": f"This {key_value} is running on automation",
+                            unique_key: key_value,
+                            "session_id": existing_session_id,
+                        }), 409
 
-            # Built the same way /start builds a service instance for
-            # run() -- session_id/framework give it add_log, set_progress,
-            # get_resource, etc.; `data` (payload) is the original /start
-            # body, in case the action needs it (e.g. credentials).
-            instance = cls(session_id=session_id, framework=self, data=payload)
+                session_id = self._create_session(name, data)
+                if unique_key:
+                    self._register_active_key(name, key_value, session_id)
+                self._run_action_in_background(cls, func, action_name, session_id, data)
 
-            try:
-                result = func(instance, data)
-            except Exception as e:
-                traceback.print_exc()
-                self.add_log(session_id, f"Error in '{action_name}': {e}", level="ERROR")
-                return jsonify({"error": str(e)}), 500
+                return jsonify({"service": name, "session_id": session_id, "status": "Automation started"}), 202
+        else:
+            def handler():
+                data = request.get_json(silent=True)
+                if data is None:
+                    return jsonify({"error": "Missing JSON payload"}), 400
 
-            if isinstance(result, tuple):
-                body, http_status = result
-                return jsonify(body), http_status
-            return jsonify(result), 200
+                session_id = data.get("session_id")
+                if not session_id:
+                    return jsonify({"error": "'session_id' is required in the request body"}), 400
+
+                with self._lock:
+                    session = self.sessions.get(session_id)
+                    session = dict(session) if session else None
+                if session is None or session.get("service") != name:
+                    return jsonify({"error": "Session not found"}), 404
+                payload = dict(session.get("payload") or {})
+
+                if schema:
+                    data = self.apply_defaults(data, schema)
+                    errors = self.validate(data, schema)
+                    if errors:
+                        return jsonify({"error": "Payload validation failed", "details": errors}), 422
+
+                # Built the same way /start builds a service instance for
+                # run() -- session_id/framework give it add_log, set_progress,
+                # get_resource, etc.; `data` (payload) is the original /start
+                # body, in case the action needs it (e.g. credentials).
+                instance = cls(session_id=session_id, framework=self, data=payload)
+
+                try:
+                    result = func(instance, data)
+                except Exception as e:
+                    traceback.print_exc()
+                    self.add_log(session_id, f"Error in '{action_name}': {e}", level="ERROR")
+                    return jsonify({"error": str(e)}), 500
+
+                if isinstance(result, tuple):
+                    body, http_status = result
+                    return jsonify(body), http_status
+                return jsonify(result), 200
 
         handler.__name__ = f"{name}_{action_name}"
         self.app.add_url_rule(f"{prefix}/{action_name}", f"{name}_{action_name}", handler, methods=methods)

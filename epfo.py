@@ -748,10 +748,34 @@ class EpfoAutomation:
         if gender_code not in ("M", "F", "T"):
             raise ValueError(f"Unrecognized gender value: {effective_gender!r} (expected M/F/T)")
 
-        marital_status = get_scraped("currentDetails.maritalStatusCode") or marital_status_code or "U"
-        qualification = get_scraped("currentDetails.qualificationCode") or qualification_code or "6"
-        pan_plain = get_scraped("currentDetails.kycDocumentList[0].number") or member_pan
-        email_plain = get_scraped("currentDetails.emailId") or member_email
+        # NOTE on precedence, and the bug this fixes:
+        # marital status, qualification, PAN and email are NOT part of the
+        # Aadhaar verification response -- the portal has no authoritative
+        # value for them for a brand-new member, so whatever
+        # parse_member_registration_form() scrapes for these fields is
+        # just whatever the HTML <select>/<input> happens to default to
+        # (its own "-- Please Select --" placeholder option, e.g. "X" for
+        # both maritalStatusCode and qualificationCode). The previous code
+        # here did `get_scraped(...) or <the member's own value> or
+        # <default>`, which means that placeholder -- being a truthy,
+        # non-empty string -- ALWAYS won over the real value the caller
+        # explicitly submitted for this member. That's exactly what turns
+        # a request for marital_status="U"/qualification="6" into a
+        # submitted payload of maritalStatusCode="X"/qualificationCode="X",
+        # which the portal doesn't recognize as a valid code and answers
+        # with a page that's neither the #success nor #error div
+        # check_save_result() knows how to read -- i.e. exactly the
+        # "unrecognized saveMemberDetails response" / UNKNOWN_ERROR you're
+        # seeing. Fixed by trying the member's own value FIRST and only
+        # falling back to whatever the portal scraped if the caller didn't
+        # supply one at all.
+        # (gender is different and deliberately left as scraped-first,
+        # a few lines up: Aadhaar verification DOES return an authoritative
+        # gender, so the portal's own value there is the correct one to trust.)
+        marital_status = marital_status_code or get_scraped("currentDetails.maritalStatusCode") or "U"
+        qualification = qualification_code or get_scraped("currentDetails.qualificationCode") or "6"
+        pan_plain = member_pan or get_scraped("currentDetails.kycDocumentList[0].number")
+        email_plain = member_email or get_scraped("currentDetails.emailId")
 
         overrides = {
             "currentDetails.doj": doj,
@@ -849,9 +873,11 @@ class EpfoAutomation:
         member_dob = member["dob"]
         member_aadhar = member["aadhar"]
 
-        def outcome(status, message=""):
+        def outcome(status, message="", **extra):
             print(f"[process_member] {member_uan}: {status} -- {message}")
-            return {"uan": member_uan, "status": status, "message": message}
+            result = {"uan": member_uan, "status": status, "message": message}
+            result.update(extra)
+            return result
         self.refresh_previous_employment_form()
         mismatch_attempts = 0
         transient_attempts = 0
@@ -911,14 +937,17 @@ class EpfoAutomation:
         self.validate_member_details()
         self.parse_member_registration_form()
 
+        marital_status_sent = member.get("marital_status") or None
+        qualification_sent = member.get("qualification") or None
+
         self.save_member_details(
             doj=member["doj"],
             wages=member["wages"],
             gender=member.get("gender") or self.aadhaar_fields.get("gender"),
             member_pan=member.get("pan") or None,
             member_email=member.get("email") or None,
-            marital_status_code=member.get("marital_status") or None,
-            qualification_code=member.get("qualification") or None,
+            marital_status_code=marital_status_sent,
+            qualification_code=qualification_sent,
         )
 
         save_result = self.check_save_result()
@@ -927,8 +956,28 @@ class EpfoAutomation:
         elif save_result["status"] == "DUPLICATE":
             return outcome("ALREADY_ADDED", save_result["message"])
         else:
-            debug_path = f"save_member_details_unknown_{member_uan}_{int(time.time())}.html"
+            # Kept permanently (not deleted) under debug_html/ so a later
+            # UNKNOWN_ERROR can actually be inspected instead of only ever
+            # printing a character count and throwing the page away. Also
+            # log the plain (non-encrypted) codes actually submitted for
+            # this member -- comparing these across an "added" vs "not
+            # added" run is usually enough to spot a bad/placeholder code
+            # without opening the HTML at all.
+            print(
+                f"[process_member] {member_uan}: submitted "
+                f"marital_status={marital_status_sent!r} qualification={qualification_sent!r} "
+                f"doj={member['doj']!r} wages={member['wages']!r} "
+                f"pan_given={bool(member.get('pan'))} email_given={bool(member.get('email'))}"
+            )
+
+            debug_dir = "debug_html"
+            debug_path = None
             try:
+                import os
+                os.makedirs(debug_dir, exist_ok=True)
+                debug_path = os.path.join(
+                    debug_dir, f"save_member_details_unknown_{member_uan}_{int(time.time())}.html"
+                )
                 with open(debug_path, "w", encoding="utf-8") as f:
                     f.write(self.html)
                 print(f"[process_member] {member_uan}: unrecognized response saved to {debug_path}")
@@ -936,20 +985,13 @@ class EpfoAutomation:
                 print(f"[process_member] WARNING: could not write debug response file: {e}")
                 debug_path = None
 
-            try:
-                if debug_path:
-                    with open(debug_path, "r", encoding="utf-8") as f:
-                        captured_html = f.read()
-                    print(f"[process_member] {member_uan}: captured {len(captured_html)} chars for inspection")
-            finally:
-                if debug_path:
-                    try:
-                        import os
-                        os.remove(debug_path)
-                    except OSError:
-                        pass
-
-            return outcome("UNKNOWN_ERROR", "unrecognized saveMemberDetails response")
+            return outcome(
+                "UNKNOWN_ERROR",
+                f"unrecognized saveMemberDetails response"
+                + (f" (saved to {debug_path})" if debug_path else " (debug file could not be saved)"),
+                debug_html=debug_path,
+                submitted={"marital_status": marital_status_sent, "qualification": qualification_sent},
+            )
 
     def run_batch(self, config, captcha_prompt=input):
         self.load_login_page()
@@ -1172,6 +1214,13 @@ class EPFOOnboarding:
     # Used directly by /epfo/member, any number of times, in any number
     # of separate HTTP requests, after login() has run once.
     # ------------------------------------------------------------------
+    def _process_member_once(self, member):
+        uan = member.get("uan") or "<unknown>"
+        try:
+            return self.pf.process_member(member)
+        except Exception as e:
+            return {"uan": uan, "status": "UNKNOWN_ERROR", "message": str(e)}
+
     def add_member(self, member):
         uan = member.get("uan") or "<unknown>"
 
@@ -1181,10 +1230,38 @@ class EPFOOnboarding:
             self.add_log(f"{uan} - invalid member data: {message}")
             return {"uan": uan, "status": "INVALID", "message": message}
 
-        try:
-            result = self.pf.process_member(member)
-        except Exception as e:
-            result = {"uan": uan, "status": "UNKNOWN_ERROR", "message": str(e)}
+        result = self._process_member_once(member)
+
+        # One-time automatic retry. An UNKNOWN_ERROR here almost always
+        # means the registration page was left in a shape process_member()
+        # didn't expect (a stale HDIV pair, leftover state from the
+        # previous member, a transient portal glitch) rather than anything
+        # wrong with this member's own data -- process_member() already
+        # backs up the page it choked on (result["debug_html"]) and the
+        # plain codes it submitted (result["submitted"]) for inspection.
+        # So: log that backup, reload a completely fresh registration
+        # page, and push this same member again exactly once before
+        # giving up on it.
+        if result.get("status") == "UNKNOWN_ERROR":
+            first_attempt = result
+            self.add_log(
+                f"{uan} - unknown error on first attempt "
+                f"(debug html: {first_attempt.get('debug_html')}); "
+                f"reloading registration page and retrying once"
+            )
+            try:
+                self.pf.view_registration()
+            except Exception as reload_err:
+                self.add_log(f"{uan} - could not reload registration page for retry: {reload_err}")
+                first_attempt["retry"] = f"not attempted (page reload failed: {reload_err})"
+                return first_attempt
+
+            result = self._process_member_once(member)
+            result["retry_of"] = first_attempt  # first failure stays attached for comparison
+            if result.get("status") == "UNKNOWN_ERROR":
+                self.add_log(f"{uan} - unknown error again on retry (debug html: {result.get('debug_html')}); giving up")
+            else:
+                self.add_log(f"{uan} - retry succeeded ({result.get('status')})")
 
         status_code = result.get("status", "UNKNOWN_ERROR")
         phrase = STATUS_LOG_PHRASES.get(status_code, status_code.lower())
