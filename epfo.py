@@ -1098,24 +1098,43 @@ REQUIRED_MEMBER_FIELDS = ("uan", "name", "aadhar", "dob", "doj", "wages")
 
 
 class EPFOOnboarding:
-    def __init__(self, data, session=None):
-        self.data = data
-        self.session = session      # live session dict from automation_framework.py
-        self.logger = None          # AutomationService instance, set by the framework
+    """
+    Two ways to drive this class, both backed by the same EpfoAutomation
+    (self.pf) portal client:
+
+    1. One-shot (legacy): run() logs in AND processes every member in
+       data["member"] in a single blocking call.
+
+    2. Incremental (preferred): login() logs in once; add_member(member)
+       is then called any number of times afterwards, one member per
+       call, reusing that same logged-in self.pf session. This is what
+       lets /epfo/start + /epfo/member work as separate HTTP requests --
+       see EPFOService in application.py, which keeps this whole object
+       alive between requests with self.set_resource(obj)/get_resource().
+    """
+
+    def __init__(self, data, service=None):
+        self.data = data or {}
+        # AutomationService instance for this session, set by the
+        # framework -- gives add_log/set_progress/set_resource/etc.
+        # Same pattern as StartupIndiaService/UdyamCertificateService.
+        self.service = service
         self.pf = EpfoAutomation()
         self.captcha_solver = PFCaptcha()
+        # Never log the plaintext password.
+        safe_data = {k: v for k, v in self.data.items() if k != "password"}
         self.add_log("Application Started")
-        self.add_log(f"Data: {data}")
+        self.add_log(f"Data: {safe_data}")
 
     # ------------------------------------------------------------------
     def add_log(self, msg):
-        if self.logger:
-            self.logger.add_log(msg)
+        if self.service:
+            self.service.add_log(msg)
         print(msg)
 
     def set_progress(self, value):
-        if self.logger and hasattr(self.logger, "set_progress"):
-            self.logger.set_progress(value)
+        if self.service and hasattr(self.service, "set_progress"):
+            self.service.set_progress(value)
 
     # ------------------------------------------------------------------
     def _validate_member(self, member):
@@ -1126,66 +1145,96 @@ class EPFOOnboarding:
         return (len(missing) == 0, missing)
 
     # ------------------------------------------------------------------
+    # Step A: log in once. Used directly by /epfo/start.
+    # ------------------------------------------------------------------
+    def login(self):
+        data = self.data
+        self.add_log("Login Started")
+        self.set_progress(0)
+        logged_in = self.pf.login_with_auto_captcha(
+            data.get("user_name"), data.get("password"), self.captcha_solver
+        )
+        if not logged_in:
+            raise RuntimeError(
+                "Login failed (bad credentials, or captcha OCR could not solve it after retries)"
+            )
+        self.add_log("Login Successful")
+
+        self.add_log("Opening Member Registration")
+        self.pf.get_user_info()
+        self.pf.view_registration()
+        self.add_log("Member Registration Page Ready")
+
+        return {"status": "logged_in", "company": data.get("company_name")}
+
+    # ------------------------------------------------------------------
+    # Step B: process ONE member using the already-logged-in self.pf.
+    # Used directly by /epfo/member, any number of times, in any number
+    # of separate HTTP requests, after login() has run once.
+    # ------------------------------------------------------------------
+    def add_member(self, member):
+        uan = member.get("uan") or "<unknown>"
+
+        is_valid, missing_fields = self._validate_member(member)
+        if not is_valid:
+            message = f"missing {', '.join(missing_fields)}"
+            self.add_log(f"{uan} - invalid member data: {message}")
+            return {"uan": uan, "status": "INVALID", "message": message}
+
+        try:
+            result = self.pf.process_member(member)
+        except Exception as e:
+            result = {"uan": uan, "status": "UNKNOWN_ERROR", "message": str(e)}
+
+        status_code = result.get("status", "UNKNOWN_ERROR")
+        phrase = STATUS_LOG_PHRASES.get(status_code, status_code.lower())
+        self.add_log(f"{uan} - {phrase}")
+
+        # Prep the "previous employment" page for whichever member gets
+        # submitted next -- mirrors run_batch()'s per-iteration
+        # is_last=False branch. Harmless if this call turns out to be the
+        # last member for this session; the next /epfo/member (if any)
+        # just reuses whatever state this leaves behind.
+        try:
+            if status_code in ("ADDED", "ALREADY_ADDED"):
+                try:
+                    self.pf._select_previous_employment_yes()
+                except RuntimeError:
+                    self.pf.view_registration()
+            else:
+                self.pf.view_registration()
+        except Exception as nav_err:
+            # Don't let next-member page prep hide this member's real
+            # result -- just note it; the *next* add_member() call will
+            # surface a clearer error itself if the session has expired.
+            self.add_log(f"{uan} - WARNING: could not prep next-member page: {nav_err}")
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Legacy one-shot flow: login + every member in data["member"], all
+    # in one blocking call. Kept for any existing caller that still wants
+    # that; new integrations should prefer login() + add_member() above.
+    # ------------------------------------------------------------------
     def run(self):
         try:
             data = self.data
             members = data.get("member") or []
             total_steps = len(members) + 1  # +1 for login/setup
 
-            self.add_log("Login Started")
-            self.set_progress(0)
-            logged_in = self.pf.login_with_auto_captcha(
-                data.get("user_name"), data.get("password"), self.captcha_solver
-            )
-            if not logged_in:
-                raise RuntimeError(
-                    "Login failed (bad credentials, or captcha OCR could not solve it after retries)"
-                )
-            self.add_log("Login Successful")
-
-            self.add_log("Opening Member Registration")
-            self.pf.get_user_info()
-            self.pf.view_registration()
-
+            self.login()
             completed_steps = 1
-            self.add_log("Member Registration Page Ready")
             self.set_progress(round(completed_steps / total_steps * 100, 1))
 
+            results = {}
             for member in members:
                 uan = member.get("uan") or "<unknown>"
-
-                is_valid, missing_fields = self._validate_member(member)
-                if not is_valid:
-                    self.add_log(f"{uan} - invalid member data: missing {', '.join(missing_fields)}")
-                    completed_steps += 1
-                    self.set_progress(round(completed_steps / total_steps * 100, 1))
-                    continue
-
-                try:
-                    result = self.pf.process_member(member)
-                except Exception as e:
-                    result = {"uan": uan, "status": "UNKNOWN_ERROR", "message": str(e)}
-
-                status_code = result.get("status", "UNKNOWN_ERROR")
-                phrase = STATUS_LOG_PHRASES.get(status_code, status_code.lower())
-                self.add_log(f"{uan} - {phrase}")
-
+                results[uan] = self.add_member(member)
                 completed_steps += 1
                 self.set_progress(round(completed_steps / total_steps * 100, 1))
 
-                if status_code in ("ADDED", "ALREADY_ADDED"):
-                    try:
-                        self.pf._select_previous_employment_yes()
-                    except RuntimeError:
-                        self.pf.view_registration()
-                else:
-                    self.pf.view_registration()
-            final_result = {
-                "total_members": len(members),
-                "logs": self.session["logs"] if self.session else [],
-            }
+            final_result = {"total_members": len(members), "results": results}
             self.add_log("Completed")
-            self.set_progress(100)
             return final_result
 
         except Exception as e:

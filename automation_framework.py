@@ -216,6 +216,55 @@ def json_build_choice_map(options: dict, group_key: str = "sub", value_key: str 
     }
 
 
+# ============================================================
+# EXTRA PER-SERVICE ENDPOINTS -- the @action decorator
+# ============================================================
+# Every service already gets /<name>/start /status /delete /logs (and
+# /otp, unless needs_otp=False) for free. @action lets a service declare
+# ADDITIONAL endpoints beyond that default set, e.g. a stateful multi-step
+# flow like EPFO's: /epfo/start logs in once, then /epfo/member is called
+# once per member reusing that same login (see set_resource/get_resource
+# above), any number of times, independently of /epfo/start.
+#
+# Usage, inside an AutomationService subclass body:
+#
+#   @framework.service("epfo", needs_otp=False, schema={...})
+#   class EPFOService(AutomationService):
+#       def run(self, data):
+#           obj = EPFOOnboarding(data=data, service=self)
+#           result = obj.login()
+#           self.set_resource(obj)      # keep it alive for /epfo/member
+#           return result
+#
+#       @action("member", schema={"member": {"type": dict, "required": True,
+#                                             "schema": _EPFO_MEMBER_SCHEMA}})
+#       def member(self, data):
+#           obj = self.get_resource()
+#           if obj is None:
+#               return {"error": "Call /epfo/start first"}, 409
+#           return obj.add_member(data["member"])
+#
+# This registers POST /epfo/member. The framework builds a fresh service
+# instance (session_id, framework, payload) for the call -- exactly like
+# /start does for run() -- then invokes the decorated method as
+# method(instance, data), where `data` is the request's JSON body
+# (defaults-applied and schema-validated first, if `schema` was given).
+# The method's return value becomes the JSON response:
+#   - a dict            -> jsonify(dict), 200
+#   - (dict, status_int) -> jsonify(dict), status_int
+# Any exception raised inside is caught, logged to the session, and
+# turned into a {"error": ...}, 500 response -- an action never needs its
+# own try/except just to keep the server alive.
+def action(name: str = None, methods=None, schema: dict = None):
+    def decorator(func):
+        func._is_action = True
+        func._action_name = name or func.__name__
+        func._action_methods = methods or ["POST"]
+        func._action_schema = schema
+        return func
+    return decorator
+
+
 class AutomationFramework:
 
     def __init__(self, name: str = __name__, log_path: str = "logs/sessions.log", port: int = 3333,
@@ -229,6 +278,14 @@ class AutomationFramework:
 
         self.sessions = {}          # session_id -> session dict
         self._lock = threading.Lock()
+
+        # session_id -> arbitrary live Python object (e.g. a logged-in
+        # portal automation instance). NEVER JSON-serialized or returned
+        # from any route directly -- purely an in-process handoff so a
+        # custom @action (see below) can reuse state a service's run()
+        # already built, instead of redoing it (e.g. logging in again)
+        # on every call. See set_resource/get_resource/clear_resource.
+        self.resources = {}
 
         self.services = {}          # service_name -> service class
         # (service_name, unique_key_value) -> session_id, for services
@@ -272,6 +329,7 @@ class AutomationFramework:
             cls.UNIQUE_KEY = unique_key
             self.services[name] = cls
             self._register_service_routes(name, cls)
+            self._register_action_routes(name, cls)
             return cls
 
         return decorator
@@ -393,6 +451,35 @@ class AutomationFramework:
             if session_id in self.sessions:
                 self.sessions[session_id]["error"] = error
                 self.sessions[session_id]["updated_at"] = _now()
+
+    def get_result(self, session_id: str):
+        """Read back whatever the session's result currently is (or None),
+        without marking it 'finished' the way the /status route does.
+        Handy for an @action that wants to append to the existing result
+        (e.g. a running list of processed items) instead of overwriting it."""
+        with self._lock:
+            session = self.sessions.get(session_id)
+            return session.get("result") if session else None
+
+    # ------------------------------------------------------------------
+    # Generic per-session resource store -- an in-memory-only handoff for
+    # a live Python object (a logged-in automation client, an open
+    # requests.Session, ...) that a service's run() built and a later
+    # @action for the same session_id needs to reuse, instead of e.g.
+    # logging in again on every call. Never JSON-serialized, never
+    # returned from a route -- purely process-local state.
+    # ------------------------------------------------------------------
+    def set_resource(self, session_id: str, obj):
+        with self._lock:
+            self.resources[session_id] = obj
+
+    def get_resource(self, session_id: str):
+        with self._lock:
+            return self.resources.get(session_id)
+
+    def clear_resource(self, session_id: str):
+        with self._lock:
+            self.resources.pop(session_id, None)
 
     # otp_type lets a single session carry more than one OTP slot (e.g. the
     # Startup India flow needs a "login" OTP, then later a "mobile" and an
@@ -834,6 +921,7 @@ class AutomationFramework:
                 existed = session is not None and session.get("service") == name
                 if existed:
                     self.sessions.pop(session_id, None)
+                self.resources.pop(session_id, None)
             if existed:
                 unique_key = getattr(cls, "UNIQUE_KEY", None)
                 if unique_key:
@@ -862,6 +950,72 @@ class AutomationFramework:
         self.app.add_url_rule(f"{prefix}/logs", f"{name}_logs", service_logs, methods=["GET"])
 
     # ------------------------------------------------------------------
+    # Extra per-service routes beyond the default start/status/otp/delete/
+    # logs set -- one per @action-decorated method on the service class.
+    # ------------------------------------------------------------------
+    def _register_action_routes(self, name: str, cls):
+        prefix = f"/{name}"
+        action_names = []
+
+        # vars(cls) only -- a service's own actions are declared directly
+        # on its own class body, never inherited from AutomationService.
+        for attr_name, attr in vars(cls).items():
+            if callable(attr) and getattr(attr, "_is_action", False):
+                action_names.append(attr._action_name)
+                self._register_one_action_route(prefix, name, cls, attr)
+
+        # exposed on /services for discovery, see _register_global_routes
+        cls.ACTIONS = action_names
+
+    def _register_one_action_route(self, prefix: str, name: str, cls, func):
+        action_name = func._action_name
+        methods = func._action_methods
+        schema = func._action_schema
+
+        def handler():
+            data = request.get_json(silent=True)
+            if data is None:
+                return jsonify({"error": "Missing JSON payload"}), 400
+
+            session_id = data.get("session_id")
+            if not session_id:
+                return jsonify({"error": "'session_id' is required in the request body"}), 400
+
+            with self._lock:
+                session = self.sessions.get(session_id)
+                session = dict(session) if session else None
+            if session is None or session.get("service") != name:
+                return jsonify({"error": "Session not found"}), 404
+            payload = dict(session.get("payload") or {})
+
+            if schema:
+                data = self.apply_defaults(data, schema)
+                errors = self.validate(data, schema)
+                if errors:
+                    return jsonify({"error": "Payload validation failed", "details": errors}), 422
+
+            # Built the same way /start builds a service instance for
+            # run() -- session_id/framework give it add_log, set_progress,
+            # get_resource, etc.; `data` (payload) is the original /start
+            # body, in case the action needs it (e.g. credentials).
+            instance = cls(session_id=session_id, framework=self, data=payload)
+
+            try:
+                result = func(instance, data)
+            except Exception as e:
+                traceback.print_exc()
+                self.add_log(session_id, f"Error in '{action_name}': {e}", level="ERROR")
+                return jsonify({"error": str(e)}), 500
+
+            if isinstance(result, tuple):
+                body, http_status = result
+                return jsonify(body), http_status
+            return jsonify(result), 200
+
+        handler.__name__ = f"{name}_{action_name}"
+        self.app.add_url_rule(f"{prefix}/{action_name}", f"{name}_{action_name}", handler, methods=methods)
+
+    # ------------------------------------------------------------------
     # Framework-wide routes: discovery + cross-service log monitor
     # ------------------------------------------------------------------
     def _register_global_routes(self):
@@ -878,7 +1032,10 @@ class AutomationFramework:
                     "schema": {
                         field: {"type": rules["type"].__name__, "required": rules.get("required", False)}
                         for field, rules in cls.PAYLOAD_SCHEMA.items()
-                    }
+                    },
+                    # extra endpoints beyond the default start/status/(otp)/delete/logs,
+                    # declared on the service with @action(...) -- see automation_framework.action
+                    "actions": getattr(cls, "ACTIONS", []),
                 }
                 for name, cls in self.services.items()
             })
@@ -959,6 +1116,28 @@ class AutomationService:
 
     def set_result(self, result):
         self.framework.set_result(self.session_id, result)
+
+    def get_result(self):
+        """Read back this session's current result (or None) without
+        marking it 'finished'. Useful in an @action that wants to append
+        to the existing result instead of overwriting it."""
+        return self.framework.get_result(self.session_id)
+
+    def set_resource(self, obj):
+        """Keep a live Python object (e.g. a logged-in automation client)
+        alive in memory for this session_id, so a later @action call for
+        the same session can reuse it via get_resource() instead of
+        rebuilding/re-logging-in from scratch."""
+        self.framework.set_resource(self.session_id, obj)
+
+    def get_resource(self):
+        """Fetch whatever set_resource() stored for this session_id, or
+        None if nothing has been stored (e.g. /start was never called, or
+        the session was deleted)."""
+        return self.framework.get_resource(self.session_id)
+
+    def clear_resource(self):
+        self.framework.clear_resource(self.session_id)
 
     def wait_for_otp(self, otp_type: str = "otp", timeout: float = 180.0, poll_interval: float = 2.0,
                       pattern=None, driver=None, consume: bool = True):

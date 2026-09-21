@@ -17,6 +17,7 @@ import re
 from automation_framework import (
     AutomationFramework,
     AutomationService,
+    action,
     json_top_level_keys,
     json_extract_values,
     json_build_choice_map,
@@ -685,6 +686,14 @@ _EPFO_MEMBER_SCHEMA = {
 # EPFO's UAN member portal has no OTP step in the onboarding flow itself,
 # so this service is registered with needs_otp=False — /epfo/otp is never
 # wired up and returns a plain 404 instead of a route that does nothing.
+#
+# Flow: POST /epfo/start (user_name/password/company_name) logs in ONCE
+# and returns a session_id. From then on, POST /epfo/member with that
+# session_id + one "member" object inserts a single member, reusing the
+# same already-logged-in portal session — call it as many times as you
+# have members, in as many separate requests as you like. POST
+# /epfo/status with that session_id shows the running list of members
+# processed so far (or the full log trail with {"view": "logs"}).
 @framework.service("epfo", needs_otp=False, schema={
     "user_name": {
         "type": str, "required": True,
@@ -693,15 +702,42 @@ _EPFO_MEMBER_SCHEMA = {
     },
     "password": {"type": str, "required": True},
     "company_name": {"type": str, "required": True},
-    "member": {"type": list, "required": True, "items": _EPFO_MEMBER_SCHEMA},
 })
 class EPFOService(AutomationService):
     def run(self, data):
         from epfo import EPFOOnboarding
 
-        self.add_log("Launching EPFO PF member onboarding automation")
-        obj = EPFOOnboarding(data=data, session=self.framework.sessions.get(self.session_id))
-        return obj.run()
+        self.add_log("Launching EPFO login")
+        obj = EPFOOnboarding(data=data, service=self)
+        result = obj.login()
+
+        # Keep the live, already-logged-in EPFOOnboarding (and its portal
+        # session) alive in memory under this session_id, so /epfo/member
+        # can reuse it later instead of logging in again for every member.
+        self.set_resource(obj)
+        return result
+
+    @action("member", schema={
+        "member": {"type": dict, "required": True, "schema": _EPFO_MEMBER_SCHEMA},
+    })
+    def member(self, data):
+        obj = self.get_resource()
+        if obj is None:
+            return {
+                "error": "No active EPFO login for this session_id. "
+                         "Call /epfo/start first (or it may have expired — start again).",
+            }, 409
+
+        result = obj.add_member(data["member"])
+
+        # Roll this member's result into the session's stored result, so a
+        # plain POST /epfo/status {"session_id": ...} (no "view") shows
+        # every member processed so far, not just the original login result.
+        current = self.get_result() or {"status": "logged_in", "members": []}
+        current.setdefault("members", []).append(result)
+        self.set_result(current)
+
+        return result
 
 
 @framework.service("itr_notice", needs_otp=False, unique_key="username", schema={
