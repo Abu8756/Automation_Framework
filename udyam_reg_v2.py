@@ -1124,16 +1124,28 @@ class UdyamRegistration:
 
         except Exception as e:
             self.service.set_progress(100)
-            self.service.add_log(f"Automation failed: {e}")
-            self.service.set_error(str(e))
+            # Selenium exceptions often have an empty str(e), so include the class name
+            error_text = f"{type(e).__name__}: {e}".strip()
+            self.service.set_error(error_text)
 
+            # Capture the screenshot FIRST (before anything else touches the
+            # browser) and attach it to the failure log entry itself, so it
+            # comes back in /udyamreg/status {"view": "logs"} as a
+            # "screenshot": "/screenshots/<file>.png" field.
             screenshot_base64 = None
             if self.driver is not None:
                 try:
                     screenshot_base64 = self.driver.get_screenshot_as_base64()
-                    self.service.add_log("Captured error screenshot")
                 except Exception as screenshot_error:
-                    self.service.add_log(f"Could not capture error screenshot: {screenshot_error}")
+                    self.service.add_log(
+                        f"Could not capture error screenshot: {screenshot_error}", level="ERROR"
+                    )
+
+            self.service.add_log(
+                f"Automation failed: {error_text}",
+                level="ERROR",
+                screenshot=screenshot_base64,
+            )
             input("1...") 
             input("2...") 
             input("1...") 
