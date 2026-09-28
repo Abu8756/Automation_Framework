@@ -705,7 +705,7 @@ class UdyamRegistration:
                     break
     
             # 🔹 If Yes → fill Date of Commencement
-            if str(self.data["commenced"]) == "1":
+            if str(self.data["commenced_operations"]) == "1":
                 com_date = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtcommencedate")))
                 com_date.clear()
                 for ch in self.data["commencement_date"]:
