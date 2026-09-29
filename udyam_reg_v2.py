@@ -61,6 +61,10 @@ import datetime
 import cv2
 import easyocr
 import numpy as np
+import pytesseract
+
+
+pytesseract.pytesseract.tesseract_cmd = (r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 
 
 # -----------------------------
@@ -88,6 +92,7 @@ class UdyamRegistration_captcha:
     def udyam_reg_captcha_resolve(self):
         try:
             captcha_base64 = self.get_captcha_base64()
+            print(captcha_base64)
 
             image_bytes = base64.b64decode(captcha_base64)
 
@@ -108,6 +113,10 @@ class UdyamRegistration_captcha:
             final_processed = cv2.bitwise_not(cleaned)
 
             results = self.reader.readtext(final_processed, detail=0)
+            print("Easyocr Result : ",results)
+
+            results = pytesseract.image_to_string(final_processed)
+            print("pytesseract Result : ", results)
 
             captcha_value = "".join(
                 c for c in "".join(results)
@@ -147,7 +156,7 @@ class UdyamRegistration:
         except NoAlertPresentException:
             pass
     
-    def wait_loader_loop(self, timeout=90):
+    def wait_loader_loop(self, timeout=300):
     
         self.service.add_log("Waiting for loader to disappear")
         start_time = time.time()
@@ -996,14 +1005,13 @@ class UdyamRegistration:
                     driver=self.driver,
                 )
 
-                otp_input = self.wait.until(
-                    EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtOtp"))
-                )
+                otp_input = self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtOtp")))
                 otp_input.clear()
                 otp_input.send_keys(otp_value)
 
                 # captcha_path = self.save_captcha()
                 captcha_value = captcha_obj.udyam_reg_captcha_resolve()
+                print("Captcha value : ",captcha_value)
                 captcha_input = self.wait.until(EC.presence_of_element_located((By.XPATH, "//input[@id='ctl00_ContentPlaceHolder1_txtCaptcha']")))
                 captcha_input.clear()
                 captcha_input.send_keys(captcha_value)
