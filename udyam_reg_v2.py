@@ -809,7 +809,7 @@ class UdyamRegistration:
             time.sleep(5)
     
             # 🔹 Select NIC 2 Digit
-            print("NIC 1 ---> ",self.data["nic"]["nic2"])
+            print("NIC 1 ---> ",self.data["nic_2_digit_code"])
             nic2_ele=self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl2NicCode")))
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic2_ele)
             time.sleep(3)
