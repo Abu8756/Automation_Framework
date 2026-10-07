@@ -21,9 +21,24 @@ import uuid
 import datetime
 
 import base64
+import hmac
+import queue
+import sqlite3
+import ssl
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, Response, g, request, jsonify, send_from_directory
 from flask_cors import CORS
+
+# Socket.IO is only needed for services registered with status_comm_type="Socket"
+# (pip install flask-socketio simple-websocket). Everything else works without it.
+try:
+    from flask_socketio import SocketIO, join_room, leave_room, emit as sio_emit
+except ImportError:                                  # pragma: no cover
+    SocketIO = None
 
 def _now() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -295,16 +310,578 @@ def action(name: str = None, methods=None, schema: dict = None, creates_session:
     return decorator
 
 
+# ======================================================================
+# API request log  (feature: every call + payload + response is stored)
+#
+#   * ONE OpenSearch index (_REQUEST_LOG_INDEX) holds every call as ONE
+#     document: url + payload + response written together, once, after
+#     the response is known.
+#   * If OpenSearch is unreachable the same document goes to SQLite.
+#     OpenSearch is re-checked every few seconds and used again as soon
+#     as it is back.
+#   * Every document carries `timestamp` (UTC ISO-8601) and `ts_ms`
+#     (epoch millis) so lists are always sorted newest-first.
+#   * Writes happen on a background thread -- a slow/down OpenSearch
+#     never slows an API call.
+# ======================================================================
+_REQUEST_LOG_INDEX = "automation_api_requests"
+_MAX_STORED_CHARS = 200_000
+_DEFAULT_MASK_KEYS = ("password", "passwd", "pwd", "otp", "token", "access_token",
+                      "refresh_token", "secret", "authorization")
+_SERVICE_ROUTE_TYPES = ("start", "status", "otp", "delete", "logs")
+_REQUEST_TYPES = _SERVICE_ROUTE_TYPES + ("action", "other")
+_FILTER_FIELDS = ("session_id", "service", "request_type", "method")
+_LIST_COLUMNS = ("request_id", "timestamp", "ts_ms", "session_id", "service", "request_type",
+                 "method", "path", "url", "status_code", "duration_ms", "client_ip", "size")
+_ALLOWED_ORIGIN = "https://indiafilings-tau.vercel.app"
+
+
+def _utc_now_parts():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return now.isoformat(timespec="milliseconds").replace("+00:00", "Z"), int(now.timestamp() * 1000)
+
+
+def _to_ms(value, end_of_day: bool = False):
+    """ISO string / epoch-millis -> epoch millis (None if empty/invalid).
+    A bare 'YYYY-MM-DD' used as an upper bound means 'end of that day'.
+    A timestamp without a timezone is read as server-local time."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)) or str(value).strip().isdigit():
+        return int(value)
+    text = str(value).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if len(text) == 10 and end_of_day:
+        dt = dt + datetime.timedelta(days=1) - datetime.timedelta(milliseconds=1)
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return int(dt.timestamp() * 1000)
+
+
+def _mask_sensitive(value, keys):
+    if isinstance(value, dict):
+        return {k: ("***" if str(k).lower() in keys else _mask_sensitive(v, keys)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mask_sensitive(v, keys) for v in value]
+    return value
+
+
+def _to_json_text(value) -> str:
+    if value is None:
+        return ""
+    text = json.dumps(value, ensure_ascii=False, default=str)
+    if len(text) > _MAX_STORED_CHARS:
+        text = json.dumps({"_truncated": True, "original_chars": len(text),
+                           "preview": text[:_MAX_STORED_CHARS]}, ensure_ascii=False)
+    return text
+
+
+def _parse_json_text(text):
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return text
+
+
+class _OpenSearchStore:
+    """Minimal OpenSearch client on the standard library (no extra pip package)."""
+
+    def __init__(self, url, index, user=None, password=None, verify_ssl=True, timeout=2.0):
+        self.url = url.rstrip("/")
+        self.index = index
+        self.timeout = timeout
+        self._auth = None
+        if user:
+            token = base64.b64encode(f"{user}:{password or ''}".encode("utf-8")).decode("ascii")
+            self._auth = f"Basic {token}"
+        self._ctx = ssl._create_unverified_context() if (self.url.startswith("https") and not verify_ssl) else None
+
+    def _call(self, method, path, body=None, timeout=None):
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(self.url + path, data=data, method=method)
+        req.add_header("Content-Type", "application/json")
+        if self._auth:
+            req.add_header("Authorization", self._auth)
+        with urllib.request.urlopen(req, timeout=timeout or self.timeout, context=self._ctx) as resp:
+            raw = resp.read()
+        return json.loads(raw) if raw else {}
+
+    def ping(self):
+        self._call("GET", "/")
+
+    def ensure_index(self):
+        try:
+            self._call("GET", f"/{self.index}")
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+            self._call("PUT", f"/{self.index}", {
+                "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+                "mappings": {"dynamic": False, "properties": {
+                    "request_id":   {"type": "keyword"},
+                    "timestamp":    {"type": "date"},
+                    "ts_ms":        {"type": "long"},
+                    "session_id":   {"type": "keyword"},
+                    "service":      {"type": "keyword"},
+                    "request_type": {"type": "keyword"},
+                    "method":       {"type": "keyword"},
+                    "path":         {"type": "keyword"},
+                    "url":          {"type": "keyword"},
+                    "status_code":  {"type": "integer"},
+                    "duration_ms":  {"type": "float"},
+                    "client_ip":    {"type": "keyword"},
+                    "size":         {"type": "integer"},
+                    # payload/response are arbitrary JSON, so they are kept as
+                    # unindexed JSON text: no mapping explosion, still in _source.
+                    "payload":      {"type": "keyword", "index": False, "doc_values": False},
+                    "response":     {"type": "keyword", "index": False, "doc_values": False},
+                }},
+            })
+
+    @staticmethod
+    def _query(f):
+        clauses = [{"term": {k: f[k]}} for k in _FILTER_FIELDS if f.get(k)]
+        rng = {}
+        if f.get("date_from") is not None:
+            rng["gte"] = f["date_from"]
+        if f.get("date_to") is not None:
+            rng["lte"] = f["date_to"]
+        if rng:
+            clauses.append({"range": {"ts_ms": rng}})
+        return {"bool": {"filter": clauses}} if clauses else {"match_all": {}}
+
+    def insert(self, doc):
+        self._call("PUT", f"/{self.index}/_doc/{doc['request_id']}", doc)
+
+    def search(self, f, size, offset=0):
+        res = self._call("POST", f"/{self.index}/_search", {
+            "query": self._query(f),
+            "sort": [{"ts_ms": "desc"}],
+            "from": offset, "size": size,
+            "track_total_hits": True,
+            "_source": {"excludes": ["payload", "response"]},
+        }, timeout=10)
+        hits = res.get("hits", {})
+        total = hits.get("total", {})
+        total = total.get("value", 0) if isinstance(total, dict) else int(total or 0)
+        return [h["_source"] for h in hits.get("hits", [])], total
+
+    def get(self, request_id):
+        try:
+            return self._call("GET", f"/{self.index}/_doc/{urllib.parse.quote(request_id, safe='')}").get("_source")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raise
+
+    def delete_by_query(self, query):
+        res = self._call("POST", f"/{self.index}/_delete_by_query?refresh=true&conflicts=proceed",
+                         {"query": query}, timeout=30)
+        return int(res.get("deleted", 0))
+
+    def delete_ids(self, ids):
+        return self.delete_by_query({"ids": {"values": list(ids)}})
+
+    def delete_filtered(self, f):
+        return self.delete_by_query(self._query(f))
+
+
+class _SQLiteStore:
+    """Fallback store used while OpenSearch is unavailable."""
+
+    def __init__(self, path):
+        self.path = path
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        self._exec("""CREATE TABLE IF NOT EXISTS api_requests (
+            request_id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, ts_ms INTEGER NOT NULL,
+            session_id TEXT, service TEXT, request_type TEXT, method TEXT, path TEXT, url TEXT,
+            status_code INTEGER, duration_ms REAL, client_ip TEXT, size INTEGER,
+            payload TEXT, response TEXT)""")
+        self._exec("CREATE INDEX IF NOT EXISTS ix_api_requests_ts ON api_requests(ts_ms DESC)")
+        self._exec("CREATE INDEX IF NOT EXISTS ix_api_requests_session ON api_requests(session_id)")
+        self._exec("CREATE INDEX IF NOT EXISTS ix_api_requests_service ON api_requests(service)")
+
+    def _exec(self, sql, params=(), fetch=False):
+        conn = sqlite3.connect(self.path, timeout=5)
+        try:
+            conn.row_factory = sqlite3.Row
+            with conn:
+                cur = conn.execute(sql, params)
+                return [dict(r) for r in cur.fetchall()] if fetch else cur.rowcount
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _where(f):
+        clauses, params = [], []
+        for k in _FILTER_FIELDS:           # fixed tuple -> safe to interpolate
+            if f.get(k):
+                clauses.append(f"{k} = ?")
+                params.append(f[k])
+        if f.get("date_from") is not None:
+            clauses.append("ts_ms >= ?")
+            params.append(f["date_from"])
+        if f.get("date_to") is not None:
+            clauses.append("ts_ms <= ?")
+            params.append(f["date_to"])
+        return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+    def insert(self, doc):
+        cols = list(_LIST_COLUMNS) + ["payload", "response"]
+        self._exec(f"INSERT OR REPLACE INTO api_requests ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                   [doc.get(c) for c in cols])
+
+    def search(self, f, size, offset=0):
+        where, params = self._where(f)
+        total = self._exec(f"SELECT COUNT(*) AS n FROM api_requests{where}", params, fetch=True)[0]["n"]
+        rows = self._exec(f"SELECT {','.join(_LIST_COLUMNS)} FROM api_requests{where} "
+                          f"ORDER BY ts_ms DESC LIMIT ? OFFSET ?", params + [size, offset], fetch=True)
+        return rows, total
+
+    def get(self, request_id):
+        rows = self._exec("SELECT * FROM api_requests WHERE request_id = ?", [request_id], fetch=True)
+        return rows[0] if rows else None
+
+    def delete_ids(self, ids):
+        ids, deleted = list(ids), 0
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            deleted += self._exec(f"DELETE FROM api_requests WHERE request_id IN ({','.join('?' * len(chunk))})", chunk)
+        return deleted
+
+    def delete_filtered(self, f):
+        where, params = self._where(f)
+        return self._exec(f"DELETE FROM api_requests{where}", params)
+
+
+class RequestLogStore:
+    """OpenSearch first, SQLite when OpenSearch is down. Reads merge both,
+    so nothing written to the fallback while OpenSearch was down is lost
+    from the DevTools view."""
+
+    def __init__(self, sqlite_path, opensearch_url=None, index=_REQUEST_LOG_INDEX, user=None,
+                 password=None, verify_ssl=True, retry_seconds=30.0):
+        self.sqlite = _SQLiteStore(sqlite_path)
+        self.sqlite_path = sqlite_path
+        self.index = index
+        self.opensearch_url = opensearch_url
+        self.os = _OpenSearchStore(opensearch_url, index, user, password, verify_ssl) if opensearch_url else None
+        self._retry_seconds = retry_seconds
+        self._os_ok = False
+        self._os_checked_at = 0.0
+        self._queue = queue.Queue(maxsize=10000)
+        if self.os:
+            print(f"[request-log] OpenSearch {'ready' if self.opensearch_available() else 'NOT reachable'} "
+                  f"at {opensearch_url}; fallback SQLite: {sqlite_path}")
+        else:
+            print(f"[request-log] OpenSearch disabled; using SQLite: {sqlite_path}")
+        threading.Thread(target=self._worker, daemon=True, name="request-log-writer").start()
+
+    # -- availability ---------------------------------------------------
+    def opensearch_available(self) -> bool:
+        if not self.os:
+            return False
+        if self._os_ok:
+            return True
+        if time.time() - self._os_checked_at < self._retry_seconds:
+            return False
+        self._os_checked_at = time.time()
+        try:
+            self.os.ping()
+            self.os.ensure_index()
+            self._os_ok = True
+        except Exception:
+            self._os_ok = False
+        return self._os_ok
+
+    def _mark_os_down(self):
+        self._os_ok = False
+        self._os_checked_at = time.time()
+
+    # -- write path -----------------------------------------------------
+    def add(self, doc):
+        try:
+            self._queue.put_nowait(doc)
+        except queue.Full:
+            print("[request-log] queue full, dropping one entry")
+
+    def _worker(self):
+        while True:
+            doc = self._queue.get()
+            try:
+                if self.opensearch_available():
+                    try:
+                        self.os.insert(doc)
+                        continue
+                    except Exception:
+                        self._mark_os_down()
+                self.sqlite.insert(doc)
+            except Exception:
+                traceback.print_exc()
+
+    # -- read / delete path --------------------------------------------
+    def search(self, filters, limit=100, offset=0):
+        want = min(limit + offset, 10000)
+        rows, total = [], 0
+        if self.opensearch_available():
+            try:
+                r, t = self.os.search(filters, want)
+                rows += [dict(x, storage="opensearch") for x in r]
+                total += t
+            except Exception:
+                self._mark_os_down()
+        r, t = self.sqlite.search(filters, want)
+        rows += [dict(x, storage="sqlite") for x in r]
+        total += t
+        rows.sort(key=lambda d: d.get("ts_ms") or 0, reverse=True)
+        return rows[offset:offset + limit], total
+
+    def get(self, request_id):
+        if self.opensearch_available():
+            try:
+                doc = self.os.get(request_id)
+                if doc:
+                    return dict(doc, storage="opensearch")
+            except Exception:
+                self._mark_os_down()
+        doc = self.sqlite.get(request_id)
+        return dict(doc, storage="sqlite") if doc else None
+
+    def delete_ids(self, ids):
+        deleted = self.sqlite.delete_ids(ids)
+        if self.opensearch_available():
+            try:
+                deleted += self.os.delete_ids(ids)
+            except Exception:
+                self._mark_os_down()
+        return deleted
+
+    def delete_filtered(self, filters):
+        deleted = self.sqlite.delete_filtered(filters)
+        if self.opensearch_available():
+            try:
+                deleted += self.os.delete_filtered(filters)
+            except Exception:
+                self._mark_os_down()
+        return deleted
+
+    def status(self):
+        return {"opensearch": self.opensearch_available(), "opensearch_url": self.opensearch_url,
+                "index": self.index, "sqlite_path": self.sqlite_path}
+
+
+# ======================================================================
+# DevTools-style network viewer, served at GET /devtools
+# (all dynamic text is inserted with textContent -- never innerHTML --
+#  because payloads/responses are untrusted data)
+# ======================================================================
+_DEVTOOLS_HTML = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>API Network</title>
+<style>
+:root{--bg:#1e1e1e;--panel:#252526;--bd:#3c3c3c;--tx:#d4d4d4;--mut:#9aa0a6;--sel:#094771;--hov:#2a2d2e;--ok:#4ec9b0;--warn:#dcdcaa;--err:#f48771;--acc:#569cd6}
+@media (prefers-color-scheme:light){:root{--bg:#fff;--panel:#f3f3f3;--bd:#d0d0d0;--tx:#1f1f1f;--mut:#6b6b6b;--sel:#cce5ff;--hov:#eef3f8;--ok:#1a7f37;--warn:#9a6700;--err:#cf222e;--acc:#0969da}}
+*{box-sizing:border-box}
+body{margin:0;height:100vh;display:flex;flex-direction:column;background:var(--bg);color:var(--tx);font:12px/1.4 -apple-system,"Segoe UI",Roboto,sans-serif}
+.bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 8px;background:var(--panel);border-bottom:1px solid var(--bd)}
+.bar b{margin-right:6px}
+input,select,button{background:var(--bg);color:var(--tx);border:1px solid var(--bd);border-radius:3px;padding:3px 6px;font:inherit}
+button{cursor:pointer}button:hover{background:var(--hov)}
+.danger{color:var(--err);border-color:var(--err)}
+.mut{color:var(--mut)}
+.main{flex:1;display:flex;min-height:0}
+.list{flex:1;overflow:auto;min-width:0}
+table{border-collapse:collapse;width:100%}
+th{position:sticky;top:0;background:var(--panel);text-align:left;font-weight:600;padding:4px 8px;border-bottom:1px solid var(--bd);white-space:nowrap}
+td{padding:3px 8px;border-bottom:1px solid var(--bd);white-space:nowrap;max-width:320px;overflow:hidden;text-overflow:ellipsis}
+tr.row{cursor:pointer}tr.row:hover{background:var(--hov)}tr.sel{background:var(--sel)!important}
+.s2{color:var(--ok)}.s4{color:var(--warn)}.s5{color:var(--err)}
+.link{color:var(--acc);cursor:pointer}.link:hover{text-decoration:underline}
+.x{color:var(--mut);cursor:pointer;border:0;background:none;font-size:14px}.x:hover{color:var(--err)}
+.detail{width:44%;min-width:320px;border-left:1px solid var(--bd);display:flex;flex-direction:column;background:var(--bg)}
+.tabs{display:flex;align-items:center;background:var(--panel);border-bottom:1px solid var(--bd)}
+.tab{padding:6px 12px;cursor:pointer;border-bottom:2px solid transparent}.tab.on{border-color:var(--acc);color:var(--acc)}
+.tabs .sp{flex:1}
+.pane{flex:1;overflow:auto;padding:8px}
+pre{margin:0;white-space:pre-wrap;word-break:break-word;font:11.5px/1.45 ui-monospace,Menlo,Consolas,monospace}
+dl{display:grid;grid-template-columns:120px 1fr;gap:4px 10px;margin:0}dt{color:var(--mut)}dd{margin:0;word-break:break-all}
+.more{margin:8px}
+[hidden]{display:none!important}
+</style></head><body>
+<div class="bar">
+  <b>API Network</b>
+  <input id="f_session" placeholder="Session ID" size="30">
+  <select id="f_service"><option value="">All services</option></select>
+  <select id="f_type"><option value="">All types</option></select>
+  <select id="f_method"><option value="">All methods</option></select>
+  <label class="mut">From <input type="datetime-local" id="f_from"></label>
+  <label class="mut">To <input type="datetime-local" id="f_to"></label>
+  <button id="b_reset">Reset</button>
+  <button id="b_refresh">Refresh</button>
+  <label class="mut"><input type="checkbox" id="auto"> Auto (3s)</label>
+  <button id="b_del_all" class="danger">Delete filtered</button>
+  <span id="info" class="mut"></span>
+</div>
+<div class="main">
+  <div class="list">
+    <table><thead><tr>
+      <th>Date / time</th><th>Method</th><th>Name</th><th>Status</th><th>Type</th><th>Service</th><th>Session</th><th>Time</th><th>Size</th><th></th>
+    </tr></thead><tbody id="rows"></tbody></table>
+    <div id="empty" class="mut" style="padding:16px" hidden>No requests match.</div>
+    <button id="more" class="more" hidden>Load more</button>
+  </div>
+  <div class="detail" id="detail" hidden>
+    <div class="tabs">
+      <div class="tab on" data-t="general">General</div>
+      <div class="tab" data-t="payload">Payload</div>
+      <div class="tab" data-t="response">Response</div>
+      <div class="sp"></div>
+      <button class="x" id="d_del" title="Delete this request">&#128465;</button>
+      <button class="x" id="d_close" title="Close">&#10005;</button>
+    </div>
+    <div class="pane" id="pane"></div>
+  </div>
+</div>
+<script>
+const TOKEN=new URLSearchParams(location.search).get("token")||"";
+const $=id=>document.getElementById(id);
+const PAGE=100;
+let offset=0,total=0,selected=null,current=null,tab="general",timer=null;
+
+async function api(path,opts={}){
+  opts.headers=Object.assign({"Content-Type":"application/json"},opts.headers||{},TOKEN?{"X-Devtools-Token":TOKEN}:{});
+  const r=await fetch(path,opts),j=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(j.error||("HTTP "+r.status));
+  return j;
+}
+const iso=v=>v?new Date(v).toISOString():"";
+function filters(){return{session_id:$("f_session").value.trim(),service:$("f_service").value,request_type:$("f_type").value,
+  method:$("f_method").value,date_from:iso($("f_from").value),date_to:iso($("f_to").value)};}
+const qs=o=>new URLSearchParams(Object.entries(o).filter(([,v])=>v!==""&&v!=null)).toString();
+const pad=(n,l=2)=>String(n).padStart(l,"0");
+function fmt(ms){const d=new Date(ms);return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(),3)}`;}
+const fmtSize=n=>n==null?"":n<1024?n+" B":(n/1024).toFixed(1)+" kB";
+function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e;}
+
+function addRow(it){
+  const tr=el("tr",null,"row"+(it.request_id===selected?" sel":""));tr.dataset.id=it.request_id;
+  tr.append(el("td",fmt(it.ts_ms)),el("td",it.method),el("td",it.path));
+  tr.lastChild.title=it.url;
+  tr.append(el("td",it.status_code,"s"+String(it.status_code)[0]),el("td",it.request_type),el("td",it.service));
+  const s=el("td",it.session_id||"-",it.session_id?"link":"mut");
+  if(it.session_id){s.title="Filter by this session";s.onclick=e=>{e.stopPropagation();$("f_session").value=it.session_id;load();};}
+  tr.append(s,el("td",it.duration_ms==null?"":Math.round(it.duration_ms)+" ms"),el("td",fmtSize(it.size)));
+  const d=el("button","\u{1F5D1}","x");d.title="Delete";d.onclick=e=>{e.stopPropagation();del(it.request_id);};
+  const td=el("td");td.append(d);tr.append(td);
+  tr.onclick=()=>select(it.request_id);
+  $("rows").append(tr);
+}
+async function load(append=false){
+  try{
+    if(!append)offset=0;
+    const j=await api("/devtools/api/requests?"+qs(Object.assign(filters(),{limit:PAGE,offset})));
+    total=j.total;if(!append)$("rows").textContent="";
+    j.items.forEach(addRow);offset+=j.items.length;
+    $("empty").hidden=total>0;$("more").hidden=offset>=total;
+    $("info").textContent=`${Math.min(offset,total)} of ${total} requests`;
+  }catch(e){$("info").textContent="Error: "+e.message;}
+}
+async function select(id){
+  selected=id;document.querySelectorAll("tr.row").forEach(r=>r.classList.toggle("sel",r.dataset.id===id));
+  try{current=await api("/devtools/api/requests/"+encodeURIComponent(id));$("detail").hidden=false;render();}
+  catch(e){alert(e.message);}
+}
+function pretty(v){return v===null||v===undefined||v===""?"(empty)":typeof v==="string"?v:JSON.stringify(v,null,2);}
+function render(){
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.t===tab));
+  const pane=$("pane");pane.textContent="";if(!current)return;
+  if(tab==="general"){
+    const dl=el("dl");
+    [["URL",current.url],["Method",current.method],["Status",current.status_code],["Service",current.service],
+     ["Request type",current.request_type],["Session ID",current.session_id||"-"],["Date / time",fmt(current.ts_ms)+"  ("+current.timestamp+")"],
+     ["Duration",current.duration_ms+" ms"],["Size",fmtSize(current.size)],["Client IP",current.client_ip||"-"],
+     ["Stored in",current.storage],["Request ID",current.request_id]].forEach(([k,v])=>dl.append(el("dt",k),el("dd",v)));
+    pane.append(dl);
+  }else{const pre=el("pre",pretty(current[tab]));pane.append(pre);}
+}
+async function del(id){
+  if(!confirm("Delete this request?"))return;
+  try{await api("/devtools/api/requests/"+encodeURIComponent(id),{method:"DELETE"});
+    if(selected===id){selected=null;current=null;$("detail").hidden=true;}load();}
+  catch(e){alert(e.message);}
+}
+$("b_del_all").onclick=async()=>{
+  if(!confirm(`Delete ALL ${total} request(s) matching the current filters? This cannot be undone.`))return;
+  try{const r=await api("/devtools/api/requests/delete",{method:"POST",body:JSON.stringify({all_filtered:true,filters:filters()})});
+    selected=null;current=null;$("detail").hidden=true;load();$("info").textContent=`Deleted ${r.deleted}`;}
+  catch(e){alert(e.message);}
+};
+document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{tab=t.dataset.t;render();});
+$("d_close").onclick=()=>{selected=null;current=null;$("detail").hidden=true;document.querySelectorAll("tr.sel").forEach(r=>r.classList.remove("sel"));};
+$("d_del").onclick=()=>selected&&del(selected);
+$("b_refresh").onclick=()=>load();
+$("more").onclick=()=>load(true);
+$("b_reset").onclick=()=>{["f_session","f_service","f_type","f_method","f_from","f_to"].forEach(i=>$(i).value="");load();};
+["f_service","f_type","f_method","f_from","f_to"].forEach(i=>$(i).onchange=()=>load());
+$("f_session").addEventListener("keydown",e=>{if(e.key==="Enter")load();});
+$("f_session").addEventListener("change",()=>load());
+$("auto").onchange=e=>{clearInterval(timer);if(e.target.checked)timer=setInterval(()=>load(),3000);};
+(async()=>{
+  try{
+    const m=await api("/devtools/api/meta");
+    const fill=(id,arr)=>arr.forEach(v=>{const o=el("option",v);o.value=v;$(id).append(o);});
+    fill("f_service",m.services);fill("f_type",m.request_types);fill("f_method",m.methods);
+    $("info").title=m.storage.opensearch?("OpenSearch index "+m.storage.index):("SQLite "+m.storage.sqlite_path);
+  }catch(e){}
+  load();
+})();
+</script></body></html>
+"""
+
+
 class AutomationFramework:
 
     def __init__(self, name: str = __name__, log_path: str = "logs/sessions.log", port: int = 3333,
-                 screenshot_dir: str = "logs/screenshots"):
+                 screenshot_dir: str = "logs/screenshots",
+                 request_log: bool = True,
+                 request_log_sqlite_path: str = "logs/api_requests.db",
+                 opensearch_url: str = None,
+                 opensearch_index: str = _REQUEST_LOG_INDEX,
+                 opensearch_user: str = None,
+                 opensearch_password: str = None,
+                 opensearch_verify_ssl: bool = None,
+                 devtools: bool = True,
+                 devtools_token: str = None,
+                 mask_sensitive: bool = True,
+                 mask_keys=_DEFAULT_MASK_KEYS):
+        """New (all optional):
+        request_log          store every API call + payload + response (OpenSearch, else SQLite)
+        opensearch_url       default env OPENSEARCH_URL or http://localhost:9200
+        opensearch_user/_password/_verify_ssl   default env OPENSEARCH_USER / OPENSEARCH_PASSWORD /
+                             OPENSEARCH_VERIFY_SSL (a local docker OpenSearch usually needs https + false)
+        devtools             serve the network viewer at GET /devtools
+        devtools_token       if set, /devtools needs ?token=... (header X-Devtools-Token on the API)
+        mask_sensitive/mask_keys   replace values of these JSON keys with *** before storing"""
         self.app = Flask(name)
         self.port = port
         CORS(
                 self.app,
-                origins="https://indiafilings-tau.vercel.app"
+                origins=_ALLOWED_ORIGIN
             )
+
+        # Live status push for services declared with status_comm_type="Socket".
+        # async_mode="threading" works with Flask's dev server and with Waitress
+        # (Waitress cannot upgrade to WebSocket, so Socket.IO falls back to
+        # long-polling there -- see run()).
+        self.socketio = (SocketIO(self.app, cors_allowed_origins=_ALLOWED_ORIGIN, async_mode="threading")
+                         if SocketIO is not None else None)
 
         self.sessions = {}          # session_id -> session dict
         self._lock = threading.Lock()
@@ -336,12 +913,45 @@ class AutomationFramework:
         self.screenshot_dir = screenshot_dir
         os.makedirs(self.screenshot_dir, exist_ok=True)
 
+        # --- API request log + DevTools view ---------------------------
+        self.devtools_token = devtools_token
+        self.mask_sensitive = mask_sensitive
+        self.mask_keys = frozenset(str(k).lower() for k in mask_keys)
+        self.request_store = None
+        if request_log:
+            verify = opensearch_verify_ssl
+            if verify is None:
+                verify = os.environ.get("OPENSEARCH_VERIFY_SSL", "true").strip().lower() not in ("0", "false", "no")
+            self.request_store = RequestLogStore(
+                sqlite_path=request_log_sqlite_path,
+                opensearch_url=opensearch_url or os.environ.get("OPENSEARCH_URL", "http://localhost:9200"),
+                index=opensearch_index,
+                user=opensearch_user or os.environ.get("OPENSEARCH_USER"),
+                password=opensearch_password or os.environ.get("OPENSEARCH_PASSWORD"),
+                verify_ssl=verify,
+            )
+            self._register_request_logging()
+            if devtools:
+                self._register_devtools_routes()
+
+        self._register_socket_events()
         self._register_global_routes()
 
     # ------------------------------------------------------------------
     # Service registration — the ONE decorator every service uses
     # ------------------------------------------------------------------
-    def service(self, name: str, schema: dict = None, needs_otp: bool = True, unique_key: str = None):
+    def service(self, name: str, schema: dict = None, needs_otp: bool = True, unique_key: str = None,
+                status_comm_type: str = "API"):
+        # status_comm_type: "API" (default) -> the client polls POST /<name>/status.
+        #                   "Socket"        -> every log line / progress / final result is ALSO
+        #                                      pushed live over Socket.IO (see _register_socket_events).
+        # /<name>/status keeps working in both modes.
+        comm_type = str(status_comm_type or "API").strip().lower()
+        if comm_type not in ("api", "socket"):
+            raise ValueError(f"status_comm_type must be 'API' or 'Socket', got {status_comm_type!r}")
+        if comm_type == "socket" and self.socketio is None:
+            raise RuntimeError(f"Service '{name}' uses status_comm_type='Socket' but Socket.IO is not "
+                               f"installed: pip install flask-socketio simple-websocket")
         schema = schema or {}
 
         def decorator(cls):
@@ -357,6 +967,7 @@ class AutomationFramework:
             # field is still running, /<name>/start refuses to spin up a
             # second one for the same value — see _active_session_for_key().
             cls.UNIQUE_KEY = unique_key
+            cls.STATUS_COMM_TYPE = comm_type
             self.services[name] = cls
             self._register_service_routes(name, cls)
             self._register_action_routes(name, cls)
@@ -439,6 +1050,7 @@ class AutomationFramework:
             if screenshot_filename:
                 entry["screenshot"] = f"/screenshots/{screenshot_filename}"
             session["logs"].append(entry)
+            log_index = len(session["logs"]) - 1
             session["status"] = message
             session["updated_at"] = _now()
             if kind == "otp":
@@ -447,6 +1059,9 @@ class AutomationFramework:
                 session["status_hits"] = session.get("status_hits", 0) + 1
             service_name = session["service"]
         self._write_log_file(service_name, session_id, level, message, kind, screenshot_filename=screenshot_filename)
+        if self._comm_type(service_name) == "socket":
+            self._emit_socket(session_id, "log", {**entry, "session_id": session_id,
+                                                  "service": service_name, "index": log_index})
 
     def _session_hit_summary(self, session_id: str, session: dict) -> dict:
 
@@ -465,10 +1080,15 @@ class AutomationFramework:
 
 
     def set_progress(self, session_id: str, progress: int):
+        service_name, value = None, None
         with self._lock:
             if session_id in self.sessions:
-                self.sessions[session_id]["progress"] = max(0, min(100, progress))
+                value = max(0, min(100, progress))
+                self.sessions[session_id]["progress"] = value
                 self.sessions[session_id]["updated_at"] = _now()
+                service_name = self.sessions[session_id]["service"]
+        if service_name and self._comm_type(service_name) == "socket":
+            self._emit_socket(session_id, "progress", {"session_id": session_id, "progress": value})
 
     def set_result(self, session_id: str, result):
         with self._lock:
@@ -811,6 +1431,7 @@ class AutomationFramework:
                 # free up the unique key regardless of success/failure so a
                 # later /start for the same PAN/username isn't blocked forever
                 self._release_active_key(service_cls.SERVICE_NAME, key_value)
+                self._emit_finished(session_id)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -853,6 +1474,7 @@ class AutomationFramework:
                 self.add_log(session_id, f"Error in '{action_name}': {e}", level="ERROR", screenshot=screenshot)
             finally:
                 self._release_active_key(service_cls.SERVICE_NAME, key_value)
+                self._emit_finished(session_id)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -892,7 +1514,8 @@ class AutomationFramework:
                 self._register_active_key(name, key_value, session_id)
             self._run_in_background(cls, session_id, data)
 
-            return jsonify({"service": name, "session_id": session_id, "status": "Automation started"}), 202
+            return jsonify({"service": name, "session_id": session_id, "status": "Automation started",
+                            "status_comm_type": self._comm_type(name)}), 202
 
         def status():
             data = request.get_json(silent=True) or {}
@@ -1083,7 +1706,8 @@ class AutomationFramework:
                     self._register_active_key(name, key_value, session_id)
                 self._run_action_in_background(cls, func, action_name, session_id, data)
 
-                return jsonify({"service": name, "session_id": session_id, "status": "Automation started"}), 202
+                return jsonify({"service": name, "session_id": session_id, "status": "Automation started",
+                            "status_comm_type": self._comm_type(name)}), 202
         else:
             def handler():
                 data = request.get_json(silent=True)
@@ -1142,6 +1766,7 @@ class AutomationFramework:
             return jsonify({
                 name: {
                     "needs_otp": getattr(cls, "NEEDS_OTP", True),
+                    "status_comm_type": getattr(cls, "STATUS_COMM_TYPE", "api"),
                     "schema": {
                         field: {"type": rules["type"].__name__, "required": rules.get("required", False)}
                         for field, rules in cls.PAYLOAD_SCHEMA.items()
@@ -1176,12 +1801,272 @@ class AutomationFramework:
                     bucket["sessions"].append(entry)
             return jsonify(grouped), 200
 
+    # ------------------------------------------------------------------
+    # status_comm_type  --  "api" (default, client polls /<name>/status)
+    #                       or "socket" (every log is also pushed live)
+    # ------------------------------------------------------------------
+    def _comm_type(self, service_name: str) -> str:
+        return getattr(self.services.get(service_name), "STATUS_COMM_TYPE", "api")
+
+    def _emit_socket(self, session_id: str, event: str, payload: dict):
+        if self.socketio is None:
+            return
+        try:
+            self.socketio.emit(event, payload, to=session_id)
+        except Exception:
+            traceback.print_exc()
+
+    def _finished_payload(self, session_id: str):
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if not session:
+                return None
+            service_name, result, error = session["service"], session.get("result"), session.get("error")
+        if result is None and error is None:
+            return None
+        base = {"session_id": session_id, "service": service_name, "finished": True}
+        if error:
+            return dict(base, status="failed", error=error)
+        return dict(base, status="completed", result=result)
+
+    def _emit_finished(self, session_id: str):
+        with self._lock:
+            session = self.sessions.get(session_id)
+            service_name = session["service"] if session else None
+        if service_name is None or self._comm_type(service_name) != "socket":
+            return
+        payload = self._finished_payload(session_id)
+        if payload:
+            self._emit_socket(session_id, "finished", payload)
+
+    def _register_socket_events(self):
+        """Socket.IO protocol for services registered with status_comm_type="Socket":
+
+            client -> server   emit("subscribe",   {"session_id": "..."})
+            server -> client   "subscribed"  {session_id, service}
+                               "log"         {session_id, service, index, time, level, kind, message, screenshot?}
+                               "progress"    {session_id, progress}
+                               "finished"    {session_id, service, finished, status, result | error}
+                               "error"       {error}
+            client -> server   emit("unsubscribe", {"session_id": "..."})
+
+        On subscribe the logs written so far are replayed first (the
+        automation usually starts logging before the client connects),
+        so each "log" carries an `index` the client can use to de-duplicate."""
+        sio = self.socketio
+        if sio is None:
+            return
+
+        @sio.on("subscribe")
+        def on_subscribe(data):
+            session_id = str((data or {}).get("session_id") or "") if isinstance(data, dict) else ""
+            with self._lock:
+                session = self.sessions.get(session_id)
+                service_name = session["service"] if session else None
+            if service_name is None:
+                sio_emit("error", {"error": "Session not found", "session_id": session_id})
+                return
+            if self._comm_type(service_name) != "socket":
+                sio_emit("error", {"error": f"'{service_name}' uses status_comm_type='API'; poll /{service_name}/status",
+                                   "session_id": session_id})
+                return
+            join_room(session_id)                       # join first, then replay -> nothing is missed
+            with self._lock:
+                session = self.sessions.get(session_id)
+                logs = list(session["logs"]) if session else []
+            sio_emit("subscribed", {"session_id": session_id, "service": service_name})
+            for i, entry in enumerate(logs):
+                sio_emit("log", {**entry, "session_id": session_id, "service": service_name, "index": i})
+            payload = self._finished_payload(session_id)
+            if payload:
+                sio_emit("finished", payload)
+
+        @sio.on("unsubscribe")
+        def on_unsubscribe(data):
+            session_id = str((data or {}).get("session_id") or "") if isinstance(data, dict) else ""
+            if session_id:
+                leave_room(session_id)
+
+    # ------------------------------------------------------------------
+    # API request log: every call -> ONE document (url + payload + response)
+    # ------------------------------------------------------------------
+    def _register_request_logging(self):
+        skip_prefixes = ("/devtools", "/screenshots", "/socket.io", "/favicon.ico")
+
+        def skipped():
+            return request.method == "OPTIONS" or request.path.startswith(skip_prefixes)
+
+        @self.app.before_request
+        def _request_log_begin():
+            if skipped():
+                return None
+            g._rl_started = time.perf_counter()
+            g._rl_ts = _utc_now_parts()
+            request.get_data(cache=True)        # keep the body readable after the view ran
+            return None
+
+        @self.app.after_request
+        def _request_log_end(response):
+            if getattr(g, "_rl_started", None) is None:
+                return response
+            try:
+                self.request_store.add(self._build_request_doc(response))
+            except Exception:
+                traceback.print_exc()           # logging must never break an API call
+            return response
+
+    def _build_request_doc(self, response) -> dict:
+        parts = [p for p in request.path.split("/") if p]
+        if parts and parts[0] in self.services:
+            service = parts[0]
+            last = parts[1] if len(parts) > 1 else ""
+            request_type = last if last in _SERVICE_ROUTE_TYPES else "action"
+        else:
+            service, request_type = "framework", "other"
+
+        body = request.get_json(silent=True)
+        payload = body if body is not None else (request.args.to_dict() or None)
+
+        if response.direct_passthrough:
+            resp_value = f"<streamed response: {response.mimetype}>"
+        elif response.is_json:
+            resp_value = response.get_json(silent=True)
+        else:
+            resp_value = response.get_data(as_text=True)[:_MAX_STORED_CHARS]
+
+        session_id = ""
+        for source in (payload, resp_value):
+            if isinstance(source, dict) and source.get("session_id"):
+                session_id = str(source["session_id"])
+                break
+
+        if self.mask_sensitive:
+            payload = _mask_sensitive(payload, self.mask_keys)
+            resp_value = _mask_sensitive(resp_value, self.mask_keys)
+
+        response_text = _to_json_text(resp_value)
+        ts_iso, ts_ms = g._rl_ts
+        return {
+            "request_id": uuid.uuid4().hex,
+            "timestamp": ts_iso,
+            "ts_ms": ts_ms,
+            "session_id": session_id,
+            "service": service,
+            "request_type": request_type,
+            "method": request.method,
+            "path": request.path,
+            "url": request.url,
+            "status_code": response.status_code,
+            "duration_ms": round((time.perf_counter() - g._rl_started) * 1000, 2),
+            "client_ip": (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[0].strip(),
+            "size": len(response_text),
+            "payload": _to_json_text(payload),
+            "response": response_text,
+        }
+
+    # ------------------------------------------------------------------
+    # DevTools network view:  GET /devtools   +   /devtools/api/...
+    # ------------------------------------------------------------------
+    def _devtools_denied(self):
+        if not self.devtools_token:
+            return None
+        supplied = request.headers.get("X-Devtools-Token") or request.args.get("token") or ""
+        if hmac.compare_digest(supplied.encode("utf-8"), self.devtools_token.encode("utf-8")):
+            return None
+        return jsonify({"error": "Unauthorized"}), 401
+
+    def _register_devtools_routes(self):
+        store = self.request_store
+
+        def filters_from(src) -> dict:
+            return {
+                "session_id": str(src.get("session_id") or "").strip(),
+                "service": str(src.get("service") or "").strip(),
+                "request_type": str(src.get("request_type") or "").strip().lower(),
+                "method": str(src.get("method") or "").strip().upper(),
+                "date_from": _to_ms(src.get("date_from")),
+                "date_to": _to_ms(src.get("date_to"), end_of_day=True),
+            }
+
+        @self.app.route("/devtools", methods=["GET"])
+        def devtools_page():
+            denied = self._devtools_denied()
+            if denied:
+                return denied
+            return Response(_DEVTOOLS_HTML, mimetype="text/html")
+
+        @self.app.route("/devtools/api/meta", methods=["GET"])
+        def devtools_meta():
+            denied = self._devtools_denied()
+            if denied:
+                return denied
+            return jsonify({
+                "services": sorted(self.services) + ["framework"],
+                "request_types": list(_REQUEST_TYPES),
+                "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+                "storage": store.status(),
+            })
+
+        @self.app.route("/devtools/api/requests", methods=["GET"])
+        def devtools_list():
+            denied = self._devtools_denied()
+            if denied:
+                return denied
+            limit = min(max(request.args.get("limit", 100, type=int), 1), 500)
+            offset = max(request.args.get("offset", 0, type=int), 0)
+            items, total = store.search(filters_from(request.args), limit, offset)
+            return jsonify({"total": total, "limit": limit, "offset": offset, "items": items})
+
+        @self.app.route("/devtools/api/requests/<request_id>", methods=["GET"])
+        def devtools_get(request_id):
+            denied = self._devtools_denied()
+            if denied:
+                return denied
+            doc = store.get(request_id)
+            if not doc:
+                return jsonify({"error": "Request not found"}), 404
+            doc["payload"] = _parse_json_text(doc.get("payload"))
+            doc["response"] = _parse_json_text(doc.get("response"))
+            return jsonify(doc)
+
+        @self.app.route("/devtools/api/requests/<request_id>", methods=["DELETE"])
+        def devtools_delete_one(request_id):
+            denied = self._devtools_denied()
+            if denied:
+                return denied
+            deleted = store.delete_ids([request_id])
+            if not deleted:
+                return jsonify({"error": "Request not found"}), 404
+            return jsonify({"deleted": deleted})
+
+        @self.app.route("/devtools/api/requests/delete", methods=["POST"])
+        def devtools_delete_many():
+            """{"ids": ["..", ".."]}   or   {"all_filtered": true, "filters": {session_id, service,
+            request_type, method, date_from, date_to}}"""
+            denied = self._devtools_denied()
+            if denied:
+                return denied
+            data = request.get_json(silent=True) or {}
+            if data.get("all_filtered"):
+                deleted = store.delete_filtered(filters_from(data.get("filters") or {}))
+            elif isinstance(data.get("ids"), list) and data["ids"]:
+                deleted = store.delete_ids([str(i) for i in data["ids"]])
+            else:
+                return jsonify({"error": "Send 'ids' (a non-empty list) or 'all_filtered': true"}), 400
+            return jsonify({"deleted": deleted})
+
     def run(self, **kwargs):
         kwargs.setdefault("host", "0.0.0.0")
         kwargs.setdefault("port", self.port)
         kwargs.setdefault("debug", True)
-        kwargs.setdefault("threaded", True)
-        self.app.run(**kwargs)
+        if self.socketio is not None:
+            # Flask-SocketIO's runner already starts the dev server threaded.
+            kwargs.pop("threaded", None)
+            kwargs.setdefault("allow_unsafe_werkzeug", True)
+            self.socketio.run(self.app, **kwargs)
+        else:
+            kwargs.setdefault("threaded", True)
+            self.app.run(**kwargs)
 
 
 class OTPTimeoutError(Exception):
