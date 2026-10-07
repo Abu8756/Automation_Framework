@@ -379,6 +379,16 @@ def _to_json_text(value) -> str:
     return text
 
 
+def _parse_status_filter(value):
+    """'404' -> (404, 404); '4xx' -> (400, 499); anything else -> (None, None)."""
+    v = str(value or "").strip().lower()
+    if re.fullmatch(r"[1-5]xx", v):
+        return int(v[0]) * 100, int(v[0]) * 100 + 99
+    if re.fullmatch(r"\d{3}", v):
+        return int(v), int(v)
+    return None, None
+
+
 def _parse_json_text(text):
     if not text:
         return None
@@ -453,6 +463,8 @@ class _OpenSearchStore:
             rng["lte"] = f["date_to"]
         if rng:
             clauses.append({"range": {"ts_ms": rng}})
+        if f.get("status_min") is not None:
+            clauses.append({"range": {"status_code": {"gte": f["status_min"], "lte": f["status_max"]}}})
         return {"bool": {"filter": clauses}} if clauses else {"match_all": {}}
 
     def insert(self, doc):
@@ -531,6 +543,9 @@ class _SQLiteStore:
         if f.get("date_to") is not None:
             clauses.append("ts_ms <= ?")
             params.append(f["date_to"])
+        if f.get("status_min") is not None:
+            clauses.append("status_code BETWEEN ? AND ?")
+            params += [f["status_min"], f["status_max"]]
         return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
     def insert(self, doc):
@@ -686,74 +701,125 @@ _DEVTOOLS_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>API Network</title>
 <style>
-:root{--bg:#1e1e1e;--panel:#252526;--bd:#3c3c3c;--tx:#d4d4d4;--mut:#9aa0a6;--sel:#094771;--hov:#2a2d2e;--ok:#4ec9b0;--warn:#dcdcaa;--err:#f48771;--acc:#569cd6}
-@media (prefers-color-scheme:light){:root{--bg:#fff;--panel:#f3f3f3;--bd:#d0d0d0;--tx:#1f1f1f;--mut:#6b6b6b;--sel:#cce5ff;--hov:#eef3f8;--ok:#1a7f37;--warn:#9a6700;--err:#cf222e;--acc:#0969da}}
+:root{color-scheme:dark light;--bg:#0f1115;--panel:#161a22;--panel2:#1b2030;--bd:#262c3a;--tx:#e4e8f0;--mut:#8b93a7;--acc:#5b8def;--sel:#1e2b4a;--hov:#1a2030;--ok:#3fb68b;--warn:#e5a93d;--err:#ef6b6b;--info:#6aa9ff;--str:#9ccf7a;--num:#e5a93d;--kw:#c586c0}
+@media (prefers-color-scheme:light){:root{--bg:#f6f7fa;--panel:#fff;--panel2:#f0f2f7;--bd:#dde1ea;--tx:#1b2030;--mut:#6a7186;--acc:#2f6bff;--sel:#e3ecff;--hov:#f1f4fa;--ok:#12805c;--warn:#a96a00;--err:#c93434;--info:#1a63d6;--str:#2e7d32;--num:#a96a00;--kw:#8e44ad}}
 *{box-sizing:border-box}
-body{margin:0;height:100vh;display:flex;flex-direction:column;background:var(--bg);color:var(--tx);font:12px/1.4 -apple-system,"Segoe UI",Roboto,sans-serif}
-.bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 8px;background:var(--panel);border-bottom:1px solid var(--bd)}
-.bar b{margin-right:6px}
-input,select,button{background:var(--bg);color:var(--tx);border:1px solid var(--bd);border-radius:3px;padding:3px 6px;font:inherit}
-button{cursor:pointer}button:hover{background:var(--hov)}
-.danger{color:var(--err);border-color:var(--err)}
+html,body{height:100%}
+body{margin:0;display:flex;flex-direction:column;background:var(--bg);color:var(--tx);font:13px/1.45 Inter,-apple-system,"Segoe UI",Roboto,sans-serif}
+body.dragging{user-select:none;cursor:col-resize}
+.mono,pre,td.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .mut{color:var(--mut)}
+/* header */
+header{display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--bd)}
+.brand{font-weight:700;font-size:15px;letter-spacing:.2px}
+.live{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,transparent);padding:2px 9px;border-radius:99px}
+.live i{width:7px;height:7px;border-radius:50%;background:var(--ok);animation:pulse 1.6s infinite}
+.live.off{color:var(--err);background:color-mix(in srgb,var(--err) 12%,transparent)}.live.off i{background:var(--err);animation:none}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--ok) 60%,transparent)}70%{box-shadow:0 0 0 6px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.grow{flex:1}
+.badge{font-size:11.5px;padding:2px 9px;border-radius:99px;border:1px solid var(--bd)}
+.badge.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,transparent)}.badge.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
+/* filters */
+.filters{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:flex-end;padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--bd)}
+.fld{display:flex;flex-direction:column;gap:3px}
+.fld>span{font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--mut)}
+input,select,button{background:var(--bg);color:var(--tx);border:1px solid var(--bd);border-radius:6px;padding:5px 9px;font:inherit;outline:none}
+input:focus,select:focus{border-color:var(--acc)}
+button{cursor:pointer}button:hover{background:var(--hov)}
+.chips{display:flex;gap:4px}
+.chip{padding:4px 10px;border-radius:99px;font-size:12px}
+.chip.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.chip[data-s="2xx"].on{background:var(--ok);border-color:var(--ok)}.chip[data-s="4xx"].on{background:var(--warn);border-color:var(--warn)}.chip[data-s="5xx"].on{background:var(--err);border-color:var(--err)}
+.danger{color:var(--err);border-color:color-mix(in srgb,var(--err) 50%,transparent)}.danger:hover{background:color-mix(in srgb,var(--err) 12%,transparent)}
+/* layout */
 .main{flex:1;display:flex;min-height:0}
 .list{flex:1;overflow:auto;min-width:0}
-table{border-collapse:collapse;width:100%}
-th{position:sticky;top:0;background:var(--panel);text-align:left;font-weight:600;padding:4px 8px;border-bottom:1px solid var(--bd);white-space:nowrap}
-td{padding:3px 8px;border-bottom:1px solid var(--bd);white-space:nowrap;max-width:320px;overflow:hidden;text-overflow:ellipsis}
-tr.row{cursor:pointer}tr.row:hover{background:var(--hov)}tr.sel{background:var(--sel)!important}
-.s2{color:var(--ok)}.s4{color:var(--warn)}.s5{color:var(--err)}
+table{border-collapse:separate;border-spacing:0;width:100%}
+th{position:sticky;top:0;z-index:2;background:var(--panel2);text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--mut);padding:7px 10px;border-bottom:1px solid var(--bd);white-space:nowrap}
+td{padding:6px 10px;border-bottom:1px solid var(--bd);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+td.name{width:100%;max-width:0;font-weight:500}
+tr.row{cursor:pointer}tr.row:nth-child(even){background:color-mix(in srgb,var(--panel) 55%,transparent)}
+tr.row:hover{background:var(--hov)}tr.row.sel{background:var(--sel)!important;box-shadow:inset 3px 0 0 var(--acc)}
+tr.row.err td.name{color:var(--err)}
+tr.row.new{animation:flash 1.6s ease-out}
+@keyframes flash{from{background:color-mix(in srgb,var(--acc) 35%,transparent)}to{background:transparent}}
+.m{display:inline-block;min-width:54px;text-align:center;font-size:11px;font-weight:700;padding:1px 6px;border-radius:4px;background:color-mix(in srgb,var(--mut) 18%,transparent)}
+.m-GET{color:var(--ok)}.m-POST{color:var(--info)}.m-DELETE{color:var(--err)}.m-PUT,.m-PATCH{color:var(--warn)}
+.pill{display:inline-block;font-weight:700;font-size:11.5px;padding:1px 8px;border-radius:99px;cursor:pointer}
+.s2{color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,transparent)}.s3{color:var(--info);background:color-mix(in srgb,var(--info) 14%,transparent)}
+.s4{color:var(--warn);background:color-mix(in srgb,var(--warn) 16%,transparent)}.s5{color:var(--err);background:color-mix(in srgb,var(--err) 16%,transparent)}
 .link{color:var(--acc);cursor:pointer}.link:hover{text-decoration:underline}
-.x{color:var(--mut);cursor:pointer;border:0;background:none;font-size:14px}.x:hover{color:var(--err)}
-.detail{width:44%;min-width:320px;border-left:1px solid var(--bd);display:flex;flex-direction:column;background:var(--bg)}
-.tabs{display:flex;align-items:center;background:var(--panel);border-bottom:1px solid var(--bd)}
-.tab{padding:6px 12px;cursor:pointer;border-bottom:2px solid transparent}.tab.on{border-color:var(--acc);color:var(--acc)}
-.tabs .sp{flex:1}
-.pane{flex:1;overflow:auto;padding:8px}
-pre{margin:0;white-space:pre-wrap;word-break:break-word;font:11.5px/1.45 ui-monospace,Menlo,Consolas,monospace}
-dl{display:grid;grid-template-columns:120px 1fr;gap:4px 10px;margin:0}dt{color:var(--mut)}dd{margin:0;word-break:break-all}
-.more{margin:8px}
+.x{color:var(--mut);border:0;background:none;font-size:15px;padding:2px 6px}.x:hover{color:var(--err);background:none}
+.empty{padding:50px 20px;text-align:center;color:var(--mut)}
+.foot{display:flex;align-items:center;gap:10px;padding:8px 14px;color:var(--mut)}
+/* detail */
+.resizer{width:5px;cursor:col-resize;background:var(--bd);flex:none}.resizer:hover{background:var(--acc)}
+.detail{width:46%;min-width:320px;display:flex;flex-direction:column;background:var(--panel);flex:none}
+.dhead{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--bd)}
+.dhead .p{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.tabs{display:flex;gap:2px;padding:0 8px;border-bottom:1px solid var(--bd)}
+.tab{padding:8px 12px;cursor:pointer;color:var(--mut);border-bottom:2px solid transparent}.tab:hover{color:var(--tx)}.tab.on{color:var(--acc);border-color:var(--acc)}
+.pane{flex:1;overflow:auto;padding:12px;position:relative}
+.tools{display:flex;gap:6px;justify-content:flex-end;margin-bottom:8px}
+.tools button{font-size:12px;padding:3px 9px}
+pre{margin:0;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.55}
+.k{color:var(--info)}.str{color:var(--str)}.num{color:var(--num)}.kw{color:var(--kw)}
+dl{display:grid;grid-template-columns:120px 1fr;gap:7px 12px;margin:0}dt{color:var(--mut)}dd{margin:0;word-break:break-all}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--tx);color:var(--bg);padding:6px 14px;border-radius:99px;font-size:12px;opacity:0;pointer-events:none;transition:opacity .2s}.toast.on{opacity:1}
 [hidden]{display:none!important}
 </style></head><body>
-<div class="bar">
-  <b>API Network</b>
-  <input id="f_session" placeholder="Session ID" size="30">
-  <select id="f_service"><option value="">All services</option></select>
-  <select id="f_type"><option value="">All types</option></select>
-  <select id="f_method"><option value="">All methods</option></select>
-  <label class="mut">From <input type="datetime-local" id="f_from"></label>
-  <label class="mut">To <input type="datetime-local" id="f_to"></label>
-  <button id="b_reset">Reset</button>
-  <button id="b_refresh">Refresh</button>
-  <label class="mut"><input type="checkbox" id="auto"> Auto (3s)</label>
+<header>
+  <span class="brand">&#9889; API Network</span>
+  <span class="live" id="live"><i></i><span id="live_t">Live</span></span>
+  <span class="grow"></span>
+  <span class="mut" id="updated"></span>
+  <span class="badge" id="storage">&hellip;</span>
+</header>
+<div class="filters">
+  <label class="fld"><span>Session ID</span><input id="f_session" placeholder="Filter by session" size="26"></label>
+  <label class="fld"><span>Service</span><select id="f_service"><option value="">All</option></select></label>
+  <label class="fld"><span>Request type</span><select id="f_type"><option value="">All</option></select></label>
+  <label class="fld"><span>Method</span><select id="f_method"><option value="">All</option></select></label>
+  <div class="fld"><span>Status code</span>
+    <div class="chips">
+      <button class="chip" data-s="">All</button><button class="chip" data-s="2xx">2xx</button><button class="chip" data-s="3xx">3xx</button>
+      <button class="chip" data-s="4xx">4xx</button><button class="chip" data-s="5xx">5xx</button>
+      <input id="f_status" placeholder="e.g. 404" size="7" maxlength="3" title="Exact code (404) or class (4xx)">
+    </div></div>
+  <label class="fld"><span>Time</span><select id="f_time">
+    <option value="">Any time</option><option value="15">Last 15 min</option><option value="60">Last hour</option>
+    <option value="1440">Last 24 hours</option><option value="custom">Custom range&hellip;</option></select></label>
+  <label class="fld" id="w_from" hidden><span>From</span><input type="datetime-local" id="f_from"></label>
+  <label class="fld" id="w_to" hidden><span>To</span><input type="datetime-local" id="f_to"></label>
+  <span class="grow"></span>
+  <button id="b_reset">Reset filters</button>
   <button id="b_del_all" class="danger">Delete filtered</button>
-  <span id="info" class="mut"></span>
 </div>
 <div class="main">
-  <div class="list">
+  <div class="list" id="list">
     <table><thead><tr>
-      <th>Date / time</th><th>Method</th><th>Name</th><th>Status</th><th>Type</th><th>Service</th><th>Session</th><th>Time</th><th>Size</th><th></th>
+      <th>Time</th><th>Method</th><th>Name</th><th>Status</th><th>Type</th><th>Service</th><th>Session</th><th>Duration</th><th>Size</th><th></th>
     </tr></thead><tbody id="rows"></tbody></table>
-    <div id="empty" class="mut" style="padding:16px" hidden>No requests match.</div>
-    <button id="more" class="more" hidden>Load more</button>
+    <div id="empty" class="empty" hidden>No requests match the current filters.</div>
+    <div class="foot"><span id="info"></span><button id="more" hidden>Load more</button></div>
   </div>
+  <div class="resizer" id="resizer" hidden></div>
   <div class="detail" id="detail" hidden>
+    <div class="dhead"><span id="d_m"></span><span class="p" id="d_p"></span><span id="d_s"></span>
+      <button class="x" id="d_del" title="Delete this request (Del)">&#128465;</button>
+      <button class="x" id="d_close" title="Close (Esc)">&#10005;</button></div>
     <div class="tabs">
-      <div class="tab on" data-t="general">General</div>
-      <div class="tab" data-t="payload">Payload</div>
-      <div class="tab" data-t="response">Response</div>
-      <div class="sp"></div>
-      <button class="x" id="d_del" title="Delete this request">&#128465;</button>
-      <button class="x" id="d_close" title="Close">&#10005;</button>
+      <div class="tab on" data-t="general">General</div><div class="tab" data-t="payload">Payload</div><div class="tab" data-t="response">Response</div>
     </div>
     <div class="pane" id="pane"></div>
   </div>
 </div>
+<div class="toast" id="toast"></div>
 <script>
 const TOKEN=new URLSearchParams(location.search).get("token")||"";
 const $=id=>document.getElementById(id);
-const PAGE=100;
-let offset=0,total=0,selected=null,current=null,tab="general",timer=null;
+const PAGE=100,POLL_MS=2000;
+let offset=0,total=0,selected=null,current=null,tab="general",busy=false,first=true,seen=new Set();
 
 async function api(path,opts={}){
   opts.headers=Object.assign({"Content-Type":"application/json"},opts.headers||{},TOKEN?{"X-Devtools-Token":TOKEN}:{});
@@ -762,85 +828,169 @@ async function api(path,opts={}){
   return j;
 }
 const iso=v=>v?new Date(v).toISOString():"";
-function filters(){return{session_id:$("f_session").value.trim(),service:$("f_service").value,request_type:$("f_type").value,
-  method:$("f_method").value,date_from:iso($("f_from").value),date_to:iso($("f_to").value)};}
 const qs=o=>new URLSearchParams(Object.entries(o).filter(([,v])=>v!==""&&v!=null)).toString();
 const pad=(n,l=2)=>String(n).padStart(l,"0");
 function fmt(ms){const d=new Date(ms);return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(),3)}`;}
+function fmtShort(ms){const d=new Date(ms),n=new Date(),t=`${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(),3)}`;
+  return d.toDateString()===n.toDateString()?t:`${pad(d.getMonth()+1)}-${pad(d.getDate())} ${t}`;}
 const fmtSize=n=>n==null?"":n<1024?n+" B":(n/1024).toFixed(1)+" kB";
+const fmtDur=n=>n==null?"":n>=1000?(n/1000).toFixed(2)+" s":Math.round(n)+" ms";
 function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e;}
+function toast(msg){const t=$("toast");t.textContent=msg;t.classList.add("on");clearTimeout(toast.h);toast.h=setTimeout(()=>t.classList.remove("on"),1400);}
+function copy(text){
+  const done=()=>toast("Copied");
+  if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(text).then(done,()=>{});
+  else{const a=el("textarea",text);a.style.cssText="position:fixed;opacity:0";document.body.append(a);a.select();document.execCommand("copy");a.remove();done();}
+}
 
-function addRow(it){
-  const tr=el("tr",null,"row"+(it.request_id===selected?" sel":""));tr.dataset.id=it.request_id;
-  tr.append(el("td",fmt(it.ts_ms)),el("td",it.method),el("td",it.path));
-  tr.lastChild.title=it.url;
-  tr.append(el("td",it.status_code,"s"+String(it.status_code)[0]),el("td",it.request_type),el("td",it.service));
-  const s=el("td",it.session_id||"-",it.session_id?"link":"mut");
-  if(it.session_id){s.title="Filter by this session";s.onclick=e=>{e.stopPropagation();$("f_session").value=it.session_id;load();};}
-  tr.append(s,el("td",it.duration_ms==null?"":Math.round(it.duration_ms)+" ms"),el("td",fmtSize(it.size)));
+function filters(){
+  const p=$("f_time").value;let from="",to="";
+  if(p==="custom"){from=iso($("f_from").value);to=iso($("f_to").value);}
+  else if(p){from=new Date(Date.now()-Number(p)*60000).toISOString();}
+  return{session_id:$("f_session").value.trim(),service:$("f_service").value,request_type:$("f_type").value,
+    method:$("f_method").value,status_code:$("f_status").value.trim(),date_from:from,date_to:to};
+}
+function syncChips(){const v=$("f_status").value.trim().toLowerCase();document.querySelectorAll(".chip").forEach(c=>c.classList.toggle("on",c.dataset.s===v));}
+
+function makeRow(it,isNew){
+  const tr=el("tr",null,"row"+(it.status_code>=400?" err":"")+(it.request_id===selected?" sel":"")+(isNew?" new":""));
+  tr.dataset.id=it.request_id;
+  const t=el("td",fmtShort(it.ts_ms),"mono mut");t.title=fmt(it.ts_ms);
+  const m=el("td");m.append(el("span",it.method,"m m-"+it.method));
+  const n=el("td",it.path,"name");n.title=it.url;
+  const st=el("td"),pill=el("span",it.status_code,"pill s"+String(it.status_code)[0]);
+  pill.title="Filter by "+it.status_code;pill.onclick=e=>{e.stopPropagation();$("f_status").value=it.status_code;syncChips();load({force:true});};
+  st.append(pill);
+  const se=el("td",it.session_id?it.session_id.slice(0,8)+"\u2026":"-",it.session_id?"link mono":"mut");
+  if(it.session_id){se.title=it.session_id+"\n(click to filter)";se.onclick=e=>{e.stopPropagation();$("f_session").value=it.session_id;load({force:true});};}
   const d=el("button","\u{1F5D1}","x");d.title="Delete";d.onclick=e=>{e.stopPropagation();del(it.request_id);};
-  const td=el("td");td.append(d);tr.append(td);
+  const dt=el("td");dt.append(d);
+  tr.append(t,m,n,st,el("td",it.request_type),el("td",it.service),se,el("td",fmtDur(it.duration_ms),"mono"),el("td",fmtSize(it.size),"mono mut"),dt);
   tr.onclick=()=>select(it.request_id);
-  $("rows").append(tr);
+  return tr;
 }
-async function load(append=false){
+
+function setLive(ok){$("live").classList.toggle("off",!ok);$("live_t").textContent=ok?"Live":"Offline";}
+async function load(o={}){
+  if(busy)return;busy=true;
   try{
-    if(!append)offset=0;
-    const j=await api("/devtools/api/requests?"+qs(Object.assign(filters(),{limit:PAGE,offset})));
-    total=j.total;if(!append)$("rows").textContent="";
-    j.items.forEach(addRow);offset+=j.items.length;
+    const more=!!o.more;
+    const limit=more?PAGE:Math.min(Math.max(PAGE,offset),500);       // keep already-loaded rows on refresh
+    const j=await api("/devtools/api/requests?"+qs(Object.assign(filters(),{limit,offset:more?offset:0})));
+    total=j.total;
+    const frag=document.createDocumentFragment();
+    j.items.forEach(it=>{frag.append(makeRow(it,!first&&!more&&!seen.has(it.request_id)));seen.add(it.request_id);});
+    if(more){$("rows").append(frag);offset+=j.items.length;}else{$("rows").replaceChildren(frag);offset=j.items.length;}
+    first=false;
     $("empty").hidden=total>0;$("more").hidden=offset>=total;
-    $("info").textContent=`${Math.min(offset,total)} of ${total} requests`;
-  }catch(e){$("info").textContent="Error: "+e.message;}
+    const errs=[...document.querySelectorAll("tr.row.err")].length;
+    $("info").textContent=`${Math.min(offset,total)} of ${total} request${total===1?"":"s"}`+(errs?` \u00b7 ${errs} with errors`:"");
+    const s=j.storage||{};
+    $("storage").textContent=s.opensearch?"OpenSearch":"SQLite fallback";
+    $("storage").className="badge "+(s.opensearch?"ok":"warn");
+    $("storage").title=s.opensearch?("Index "+s.index):("OpenSearch unavailable \u2014 "+s.sqlite_path);
+    $("updated").textContent="Updated "+new Date().toLocaleTimeString([],{hour12:false});
+    setLive(true);
+  }catch(e){setLive(false);$("info").textContent="Error: "+e.message;}
+  finally{busy=false;}
 }
+
 async function select(id){
   selected=id;document.querySelectorAll("tr.row").forEach(r=>r.classList.toggle("sel",r.dataset.id===id));
-  try{current=await api("/devtools/api/requests/"+encodeURIComponent(id));$("detail").hidden=false;render();}
-  catch(e){alert(e.message);}
+  try{current=await api("/devtools/api/requests/"+encodeURIComponent(id));openDetail();render();}
+  catch(e){toast(e.message);}
 }
-function pretty(v){return v===null||v===undefined||v===""?"(empty)":typeof v==="string"?v:JSON.stringify(v,null,2);}
+function openDetail(){$("detail").hidden=false;$("resizer").hidden=false;}
+function closeDetail(){selected=null;current=null;$("detail").hidden=true;$("resizer").hidden=true;document.querySelectorAll("tr.sel").forEach(r=>r.classList.remove("sel"));}
+
+function pretty(v){return v===null||v===undefined||v===""?"":typeof v==="string"?v:JSON.stringify(v,null,2);}
+function highlight(text){          // DOM-built (never innerHTML): payloads are untrusted
+  const frag=document.createDocumentFragment();
+  if(text.length>150000){frag.append(text);return frag;}
+  const re=/("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;let last=0,m;
+  while((m=re.exec(text))){
+    if(m.index>last)frag.append(text.slice(last,m.index));
+    if(m[1]){frag.append(el("span",m[1],m[2]?"k":"str"));if(m[2])frag.append(m[2]);}
+    else frag.append(el("span",m[0],m[3]?"kw":"num"));
+    last=re.lastIndex;
+  }
+  if(last<text.length)frag.append(text.slice(last));
+  return frag;
+}
+function curl(d){
+  let s=`curl -X ${d.method} '${d.url}'`;
+  if(d.method!=="GET"&&d.payload!=null&&d.payload!=="")s+=` \\\n  -H 'Content-Type: application/json' \\\n  -d '${JSON.stringify(d.payload).replace(/'/g,"'\\''")}'`;
+  return s;
+}
 function render(){
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.t===tab));
   const pane=$("pane");pane.textContent="";if(!current)return;
+  $("d_m").replaceChildren(el("span",current.method,"m m-"+current.method));
+  $("d_p").textContent=current.path;$("d_p").title=current.url;
+  $("d_s").replaceChildren(el("span",current.status_code,"pill s"+String(current.status_code)[0]));
   if(tab==="general"){
+    const tools=el("div",null,"tools"),b=el("button","Copy as cURL");b.onclick=()=>copy(curl(current));
+    const b2=el("button","Copy session ID");b2.onclick=()=>current.session_id&&copy(current.session_id);
+    tools.append(b,b2);pane.append(tools);
     const dl=el("dl");
-    [["URL",current.url],["Method",current.method],["Status",current.status_code],["Service",current.service],
-     ["Request type",current.request_type],["Session ID",current.session_id||"-"],["Date / time",fmt(current.ts_ms)+"  ("+current.timestamp+")"],
-     ["Duration",current.duration_ms+" ms"],["Size",fmtSize(current.size)],["Client IP",current.client_ip||"-"],
-     ["Stored in",current.storage],["Request ID",current.request_id]].forEach(([k,v])=>dl.append(el("dt",k),el("dd",v)));
+    [["URL",current.url],["Method",current.method],["Status",current.status_code],["Service",current.service],["Request type",current.request_type],
+     ["Session ID",current.session_id||"-"],["Date / time",fmt(current.ts_ms)],["UTC",current.timestamp],["Duration",fmtDur(current.duration_ms)],
+     ["Size",fmtSize(current.size)],["Client IP",current.client_ip||"-"],["Stored in",current.storage],["Request ID",current.request_id]]
+      .forEach(([k,v])=>dl.append(el("dt",k),el("dd",v)));
     pane.append(dl);
-  }else{const pre=el("pre",pretty(current[tab]));pane.append(pre);}
+  }else{
+    const text=pretty(current[tab]);
+    const tools=el("div",null,"tools"),b=el("button","Copy");b.onclick=()=>copy(text);tools.append(b);pane.append(tools);
+    if(!text)pane.append(el("div","(empty)","mut"));
+    else{const pre=el("pre",null,"mono");pre.append(highlight(text));pane.append(pre);}
+  }
 }
 async function del(id){
   if(!confirm("Delete this request?"))return;
-  try{await api("/devtools/api/requests/"+encodeURIComponent(id),{method:"DELETE"});
-    if(selected===id){selected=null;current=null;$("detail").hidden=true;}load();}
-  catch(e){alert(e.message);}
+  try{await api("/devtools/api/requests/"+encodeURIComponent(id),{method:"DELETE"});if(selected===id)closeDetail();seen.delete(id);load({force:true});}
+  catch(e){toast(e.message);}
 }
 $("b_del_all").onclick=async()=>{
   if(!confirm(`Delete ALL ${total} request(s) matching the current filters? This cannot be undone.`))return;
   try{const r=await api("/devtools/api/requests/delete",{method:"POST",body:JSON.stringify({all_filtered:true,filters:filters()})});
-    selected=null;current=null;$("detail").hidden=true;load();$("info").textContent=`Deleted ${r.deleted}`;}
-  catch(e){alert(e.message);}
+    closeDetail();await load();toast(`Deleted ${r.deleted}`);}catch(e){toast(e.message);}
 };
 document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{tab=t.dataset.t;render();});
-$("d_close").onclick=()=>{selected=null;current=null;$("detail").hidden=true;document.querySelectorAll("tr.sel").forEach(r=>r.classList.remove("sel"));};
-$("d_del").onclick=()=>selected&&del(selected);
-$("b_refresh").onclick=()=>load();
-$("more").onclick=()=>load(true);
-$("b_reset").onclick=()=>{["f_session","f_service","f_type","f_method","f_from","f_to"].forEach(i=>$(i).value="");load();};
-["f_service","f_type","f_method","f_from","f_to"].forEach(i=>$(i).onchange=()=>load());
-$("f_session").addEventListener("keydown",e=>{if(e.key==="Enter")load();});
-$("f_session").addEventListener("change",()=>load());
-$("auto").onchange=e=>{clearInterval(timer);if(e.target.checked)timer=setInterval(()=>load(),3000);};
+$("d_close").onclick=closeDetail;$("d_del").onclick=()=>selected&&del(selected);
+$("more").onclick=()=>load({more:true});
+document.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{$("f_status").value=c.dataset.s;syncChips();load();});
+let deb;const debounced=()=>{clearTimeout(deb);deb=setTimeout(()=>load(),300);};
+$("f_session").addEventListener("input",debounced);
+$("f_status").addEventListener("input",()=>{syncChips();debounced();});
+["f_service","f_type","f_method","f_from","f_to"].forEach(i=>$(i).addEventListener("change",()=>load()));
+$("f_time").addEventListener("change",()=>{const c=$("f_time").value==="custom";$("w_from").hidden=!c;$("w_to").hidden=!c;load();});
+$("b_reset").onclick=()=>{["f_session","f_service","f_type","f_method","f_status","f_from","f_to","f_time"].forEach(i=>$(i).value="");
+  $("w_from").hidden=$("w_to").hidden=true;syncChips();load();};
+// drag-to-resize detail pane
+let drag=false;
+$("resizer").addEventListener("mousedown",e=>{drag=true;document.body.classList.add("dragging");e.preventDefault();});
+window.addEventListener("mousemove",e=>{if(drag)$("detail").style.width=Math.min(Math.max(innerWidth-e.clientX,320),innerWidth-300)+"px";});
+window.addEventListener("mouseup",()=>{drag=false;document.body.classList.remove("dragging");});
+// keyboard: up/down to move through requests, Esc to close, Del to delete
+document.addEventListener("keydown",e=>{
+  const tag=(e.target.tagName||"").toLowerCase();
+  if(["input","select","textarea"].includes(tag)){if(e.key==="Escape")e.target.blur();return;}
+  if(e.key==="ArrowDown"||e.key==="ArrowUp"){
+    const rows=[...document.querySelectorAll("tr.row")];if(!rows.length)return;
+    let i=rows.findIndex(r=>r.dataset.id===selected);
+    i=e.key==="ArrowDown"?Math.min(rows.length-1,i+1):Math.max(0,i<0?0:i-1);
+    rows[i].scrollIntoView({block:"nearest"});select(rows[i].dataset.id);e.preventDefault();
+  }else if(e.key==="Escape")closeDetail();
+  else if(e.key==="Delete"&&selected)del(selected);
+});
+// auto-refresh is ALWAYS on (pauses only while the tab is hidden)
+setInterval(()=>{if(!document.hidden)load();},POLL_MS);
+document.addEventListener("visibilitychange",()=>{if(!document.hidden)load();});
 (async()=>{
-  try{
-    const m=await api("/devtools/api/meta");
+  try{const m=await api("/devtools/api/meta");
     const fill=(id,arr)=>arr.forEach(v=>{const o=el("option",v);o.value=v;$(id).append(o);});
-    fill("f_service",m.services);fill("f_type",m.request_types);fill("f_method",m.methods);
-    $("info").title=m.storage.opensearch?("OpenSearch index "+m.storage.index):("SQLite "+m.storage.sqlite_path);
-  }catch(e){}
-  load();
+    fill("f_service",m.services);fill("f_type",m.request_types);fill("f_method",m.methods);}catch(e){}
+  syncChips();load();
 })();
 </script></body></html>
 """
@@ -1979,7 +2129,10 @@ class AutomationFramework:
         store = self.request_store
 
         def filters_from(src) -> dict:
+            status_min, status_max = _parse_status_filter(src.get("status_code"))
             return {
+                "status_min": status_min,
+                "status_max": status_max,
                 "session_id": str(src.get("session_id") or "").strip(),
                 "service": str(src.get("service") or "").strip(),
                 "request_type": str(src.get("request_type") or "").strip().lower(),
@@ -2015,7 +2168,8 @@ class AutomationFramework:
             limit = min(max(request.args.get("limit", 100, type=int), 1), 500)
             offset = max(request.args.get("offset", 0, type=int), 0)
             items, total = store.search(filters_from(request.args), limit, offset)
-            return jsonify({"total": total, "limit": limit, "offset": offset, "items": items})
+            return jsonify({"total": total, "limit": limit, "offset": offset, "items": items,
+                            "storage": store.status()})
 
         @self.app.route("/devtools/api/requests/<request_id>", methods=["GET"])
         def devtools_get(request_id):
