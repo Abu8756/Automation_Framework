@@ -62,7 +62,8 @@ import cv2
 import easyocr
 import numpy as np
 import pytesseract
-
+from PIL import Image
+import io
 
 pytesseract.pytesseract.tesseract_cmd = (r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 
@@ -94,34 +95,77 @@ class UdyamRegistration_captcha:
             captcha_base64 = self.get_captcha_base64()
             print(captcha_base64)
 
-            image_bytes = base64.b64decode(captcha_base64)
+            # image_bytes = base64.b64decode(captcha_base64)
 
-            nparr = np.frombuffer(image_bytes, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            # nparr = np.frombuffer(image_bytes, np.uint8)
+            # img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-            if img is None:
-                return "000000"
+            # if img is None:
+            #     return "000000"
 
-            lower_blue = np.array([100, 40, 10])
-            upper_blue = np.array([160, 80, 40])
+            # lower_blue = np.array([100, 40, 10])
+            # upper_blue = np.array([160, 80, 40])
 
-            mask = cv2.inRange(img, lower_blue, upper_blue)
+            # mask = cv2.inRange(img, lower_blue, upper_blue)
 
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-            cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+            # cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-            final_processed = cv2.bitwise_not(cleaned)
+            # final_processed = cv2.bitwise_not(cleaned)
 
-            results = self.reader.readtext(final_processed, detail=0)
-            print("Easyocr Result : ",results)
+            image_data = base64.b64decode(captcha_base64)
 
-            results = pytesseract.image_to_string(final_processed)
-            print("pytesseract Result : ", results)
+            img = Image.open(io.BytesIO(image_data))
+            img = img.convert("RGBA")
 
-            captcha_value = "".join(
-                c for c in "".join(results)
-                if c.isalnum()
-            ).upper()
+            target_color_rgb = (25, 60, 130)
+            tolerance = 20
+
+            data = np.array(img)
+
+            r = data[:, :, 0]
+            g = data[:, :, 1]
+            b = data[:, :, 2]
+            a = data[:, :, 3]
+
+            mask_target_color = (
+                (r >= target_color_rgb[0] - tolerance) &
+                (r <= target_color_rgb[0] + tolerance) &
+                (g >= target_color_rgb[1] - tolerance) &
+                (g <= target_color_rgb[1] + tolerance) &
+                (b >= target_color_rgb[2] - tolerance) &
+                (b <= target_color_rgb[2] + tolerance)
+            )
+
+            # Make non-target pixels transparent
+            a[~mask_target_color] = 0
+
+            # Make target pixels visible
+            a[mask_target_color] = 255
+
+            processed_data = np.stack([r, g, b, a], axis=-1)
+
+            processed_img = Image.fromarray(processed_data, "RGBA")
+
+            # EasyOCR
+            # Convert PIL → NumPy for EasyOCR
+            processed_array = np.array(processed_img)
+
+            # EasyOCR
+            easyocr_result = self.reader.readtext(
+                processed_array,
+                detail=0
+            )
+            print("EasyOCR Result:", easyocr_result)
+
+            # Save processed image
+            processed_img.save("debug.png")
+
+            # Tesseract
+            tesseract_result  = pytesseract.image_to_string(processed_img,config="--psm 7")
+            print("pytesseract Result:", tesseract_result )
+
+            captcha_value = "".join(c for c in "".join(easyocr_result) if c.isalnum()).upper()
 
             return captcha_value
 
@@ -220,7 +264,7 @@ class UdyamRegistration:
 
             self.driver.get("https://udyamregistration.gov.in/")
             self.service.add_log("Portal opened successfully")
-    
+            time.sleep(1)
             self.wait = WebDriverWait(self.driver, 90)
             for i in range(5):
                 try:
@@ -251,8 +295,10 @@ class UdyamRegistration:
     
             self.service.add_log("Portal Loaded Successfully")
             self.service.set_progress(8)
+            time.sleep(1)
     
             self.service.add_log("Udyam Registration clicked successfully")
+            time.sleep(1)
     
             #--------------------------------------------------------------#
             #                                                              #  
@@ -264,11 +310,15 @@ class UdyamRegistration:
             aadhaar = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtadharno")))
             aadhaar.clear()
             aadhaar.send_keys(self.data["aadhaar_number"])
+
+            time.sleep(2)
     
             # Fill Name
             name = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtownername")))
             name.clear()
             name.send_keys(self.data["aadhaar_name"])
+
+            time.sleep(2)
     
             # Click Validate & Generate OTP
             otp_btn = self.wait.until(EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_btnValidateAadhaar")))
@@ -796,6 +846,15 @@ class UdyamRegistration:
             #  1 = Manufacturing, 2 = Services, 3 = Trading                                                           #
             #                                                                                                         #
             #---------------------------------------------------------------------------------------------------------#
+
+            # "nic_codesss"={
+            #     "manu":[{
+            #     "nic2":"",
+            #     "nic4":"",
+            #     "nic5":""
+            # },{},{}],
+            # "serv":[{},{}]
+            # }
     
             options = self.driver.find_elements(By.NAME, "ctl00$ContentPlaceHolder1$rdbCatggMultiple")
     
