@@ -847,71 +847,215 @@ class UdyamRegistration:
             #                                                                                                         #
             #---------------------------------------------------------------------------------------------------------#
 
-            # "nic_codesss"={
-            #     "manu":[{
+            # "nic_codes"={
+            #     "1 (This Number is nic_activity)":[{
             #     "nic2":"",
             #     "nic4":"",
             #     "nic5":""
-            # },{},{}],
-            # "serv":[{},{}]
+            # },{},{} -(each to lop[ to select it) ]],
+            # "2 - (This Number is nic_activity)":[{},{}]
             # }
+
+
     
-            options = self.driver.find_elements(By.NAME, "ctl00$ContentPlaceHolder1$rdbCatggMultiple")
+            # options = self.driver.find_elements(By.NAME, "ctl00$ContentPlaceHolder1$rdbCatggMultiple")
     
-            for opt in options:
-                if opt.get_attribute("value") == str(self.data["nic_activity"]):
-                    self.driver.execute_script("arguments[0].click();", opt)
-                    break
+            # for opt in options:
+            #     if opt.get_attribute("value") == str(self.data["nic_activity"]):
+            #         self.driver.execute_script("arguments[0].click();", opt)
+            #         break
     
-            # 🔹 Scroll to NIC section
-            nic_section = self.wait.until(EC.presence_of_element_located((By.XPATH, "//b[contains(text(),'NIC 2 Digit Code')]")))
-            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic_section)
-            time.sleep(5)
-            self.service.add_log("NIC section loaded successfully")
+            # # 🔹 Scroll to NIC section
+            # nic_section = self.wait.until(EC.presence_of_element_located((By.XPATH, "//b[contains(text(),'NIC 2 Digit Code')]")))
+            # self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic_section)
+            # time.sleep(5)
+            # self.service.add_log("NIC section loaded successfully")
     
-            #---------------------------------------------------------------------------------------------------------#
-            #                                                                                                         #
-            # NIC 2 Digit Code, NIC 4 Digit Code, NIC 5 Digit Code                                                    #
-            #                                                                                                         #
-            #---------------------------------------------------------------------------------------------------------#
-            time.sleep(5)
+            # #---------------------------------------------------------------------------------------------------------#
+            # #                                                                                                         #
+            # # NIC 2 Digit Code, NIC 4 Digit Code, NIC 5 Digit Code                                                    #
+            # #                                                                                                         #
+            # #---------------------------------------------------------------------------------------------------------#
+            # time.sleep(5)
     
-            # 🔹 Select NIC 2 Digit
-            print("NIC 1 ---> ",self.data["nic_2_digit_code"])
-            nic2_ele=self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl2NicCode")))
-            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic2_ele)
-            time.sleep(3)
-            nic2 = Select(nic2_ele)
+            # # 🔹 Select NIC 2 Digit
+            # print("NIC 1 ---> ",self.data["nic_2_digit_code"])
+            # nic2_ele=self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl2NicCode")))
+            # self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic2_ele)
+            # time.sleep(3)
+            # nic2 = Select(nic2_ele)
             
-            nic2.select_by_value(self.data["nic_2_digit_code"])
-            self.wait_loader_loop()
-            time.sleep(4)
+            # nic2.select_by_value(self.data["nic_2_digit_code"])
+            # self.wait_loader_loop()
+            # time.sleep(4)
     
-            # 🔹 Select NIC 4 Digit
-            print("NIC 4 ---> ",self.data["nic_4_digit_code"])
-            nic4_ele=self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl4NicCode")))
-            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic4_ele)
-            time.sleep(3)
-            nic4 = Select(nic4_ele)
-            nic4.select_by_value(self.data["nic_4_digit_code"])
-            self.wait_loader_loop()
-            time.sleep(4)
+            # # 🔹 Select NIC 4 Digit
+            # print("NIC 4 ---> ",self.data["nic_4_digit_code"])
+            # nic4_ele=self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl4NicCode")))
+            # self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic4_ele)
+            # time.sleep(3)
+            # nic4 = Select(nic4_ele)
+            # nic4.select_by_value(self.data["nic_4_digit_code"])
+            # self.wait_loader_loop()
+            # time.sleep(4)
     
-            # 🔹 Select NIC 5 Digit
-            print("NIC 5 ---> ",self.data["nic_5_digit_code"])
-            nic5_ele=self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl5NicCode")))
-            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic5_ele)
-            time.sleep(3)
-            nic5 = Select(nic5_ele)
-            nic5.select_by_value(self.data["nic_5_digit_code"])
-            self.wait_loader_loop()
-            time.sleep(4)
+            # # 🔹 Select NIC 5 Digit
+            # print("NIC 5 ---> ",self.data["nic_5_digit_code"])
+            # nic5_ele=self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddl5NicCode")))
+            # self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nic5_ele)
+            # time.sleep(3)
+            # nic5 = Select(nic5_ele)
+            # nic5.select_by_value(self.data["nic_5_digit_code"])
+            # self.wait_loader_loop()
+            # time.sleep(4)
     
-            # 🔹 Click Add Activity
-            add_btn = self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_btnAddMore")))
-            self.driver.execute_script("arguments[0].click();", add_btn)
-            self.wait_loader_loop()
-            self.service.add_log("Add NIC 2,4,5 Activity Succussfully added")
+            # # 🔹 Click Add Activity
+            # add_btn = self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_btnAddMore")))
+            # self.driver.execute_script("arguments[0].click();", add_btn)
+            # self.wait_loader_loop()
+            # self.service.add_log("Add NIC 2,4,5 Activity Succussfully added")
+            # self.service.set_progress(82)
+
+
+
+            # NIC activity categories:
+            # 1 = Manufacturing, 2 = Services, 3 = Trading
+
+            nic_codes = {
+                "1": [
+                    {"nic2": "01", "nic4": "0146", "nic5": "01462"},
+                    {"nic2": "05", "nic4": "0510", "nic5": "05101"}
+                ],
+                "2": [
+                    {"nic2": "49", "nic4": "4911", "nic5": "49110"}
+                ],
+                "3": [
+                    {"nic2": "45", "nic4": "4510", "nic5": "45101"}
+                ]
+            }
+
+            # nic_codes = self.data["nic_codes"]
+
+            for nic_activity, activities in nic_codes.items():
+
+                # Select NIC activity category
+                options = self.driver.find_elements(
+                    By.NAME,
+                    "ctl00$ContentPlaceHolder1$rdbCatggMultiple"
+                )
+
+                for opt in options:
+                    if opt.get_attribute("value") == str(nic_activity):
+                        self.driver.execute_script(
+                            "arguments[0].click();", opt
+                        )
+                        break
+
+                # Scroll to NIC section
+                nic_section = self.wait.until(
+                    EC.presence_of_element_located(
+                        (By.XPATH, "//b[contains(text(),'NIC 2 Digit Code')]")
+                    )
+                )
+
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});",
+                    nic_section
+                )
+
+                time.sleep(5)
+                self.service.add_log(
+                    f"NIC activity category {nic_activity} selected"
+                )
+
+                # Loop through each NIC dictionary in this category
+                for activity in activities:
+
+                    # Select NIC 2 Digit
+                    print("NIC 2 ---> ", activity["nic2"])
+
+                    nic2_ele = self.wait.until(
+                        EC.presence_of_element_located(
+                            (By.ID, "ctl00_ContentPlaceHolder1_ddl2NicCode")
+                        )
+                    )
+
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});",
+                        nic2_ele
+                    )
+
+                    time.sleep(3)
+
+                    nic2 = Select(nic2_ele)
+                    nic2.select_by_value(str(activity["nic2"]))
+
+                    self.wait_loader_loop()
+                    time.sleep(4)
+
+                    # Select NIC 4 Digit
+                    print("NIC 4 ---> ", activity["nic4"])
+
+                    nic4_ele = self.wait.until(
+                        EC.presence_of_element_located(
+                            (By.ID, "ctl00_ContentPlaceHolder1_ddl4NicCode")
+                        )
+                    )
+
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});",
+                        nic4_ele
+                    )
+
+                    time.sleep(3)
+
+                    nic4 = Select(nic4_ele)
+                    nic4.select_by_value(str(activity["nic4"]))
+
+                    self.wait_loader_loop()
+                    time.sleep(4)
+
+                    # Select NIC 5 Digit
+                    print("NIC 5 ---> ", activity["nic5"])
+
+                    nic5_ele = self.wait.until(
+                        EC.presence_of_element_located(
+                            (By.ID, "ctl00_ContentPlaceHolder1_ddl5NicCode")
+                        )
+                    )
+
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});",
+                        nic5_ele
+                    )
+
+                    time.sleep(3)
+
+                    nic5 = Select(nic5_ele)
+                    nic5.select_by_value(str(activity["nic5"]))
+
+                    self.wait_loader_loop()
+                    time.sleep(4)
+
+                    # Click Add Activity
+                    add_btn = self.wait.until(
+                        EC.presence_of_element_located(
+                            (By.ID, "ctl00_ContentPlaceHolder1_btnAddMore")
+                        )
+                    )
+
+                    self.driver.execute_script(
+                        "arguments[0].click();", add_btn
+                    )
+
+                    self.wait_loader_loop()
+
+                    self.service.add_log(
+                        f"NIC codes {activity['nic2']}, "
+                        f"{activity['nic4']}, {activity['nic5']} added successfully"
+                    )
+
+            self.service.add_log("All NIC activities processed successfully")
             self.service.set_progress(82)
     
             #---------------------------------------------------------------------------------------------------------#
