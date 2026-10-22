@@ -97,6 +97,31 @@ MAJOR_ACTIVITY_CHOICES = ["1", "2"]
 MAJOR_ACTIVITY_UNDER_SERVICES_CHOICES = ["1", "2"]
 PREVIOUS_EM_CHOICES = ["0", "2", "4"]
 NIC_ACTIVITY_CHOICES = ["1", "2", "3"]
+NIC_ACTIVITY_KEY_ALIASES = {   # 1=Manufacturing 2=Services 3=Trading
+    "manu": "1", "manufacturing": "1",
+    "service": "2", "services": "2",
+    "trading": "3", "trade": "3",
+}
+_NIC_CODE_ITEM_SCHEMA = {
+    "nic2": {
+        "type": str, "required": True,
+        "extract_number": True,  # accepts "45" or "45-Wholesale and retail trade..."
+        "pattern": _NUMERIC_ONLY_RE,
+        "pattern_message": "'nic2' must be numeric only",
+    },
+    "nic4": {
+        "type": str, "required": True,
+        "extract_number": True,  # accepts "4520" or "4520-Maintenance and repair..."
+        "pattern": _NUMERIC_ONLY_RE,
+        "pattern_message": "'nic4' must be numeric only",
+    },
+    "nic5": {
+        "type": str, "required": True,
+        "extract_number": True,  # accepts "45200" or "45200-Maintenance and repair..."
+        "pattern": _NUMERIC_ONLY_RE,
+        "pattern_message": "'nic5' must be numeric only",
+    },
+}
 COMMENCED_CHOICES = ["0", "1"]
 GST_CHOICES = ["0", "1", "2"]
 CATEGORY_CHOICES = ["0", "1", "2", "3"]
@@ -262,34 +287,18 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
         "choices": MAJOR_ACTIVITY_UNDER_SERVICES_CHOICES,
         "choices_message": f"'major_activity_under_services' must be one of: {', '.join(MAJOR_ACTIVITY_UNDER_SERVICES_CHOICES)}",
     },
-    #-------------- Nic Activity ---------
-    "nic_activity": {
-        "type": str, "required": True,
-        "extract_number": True,  # accepts "2" or "2-Services"
-        "pattern": _NUMERIC_ONLY_RE,
-        "pattern_message": "'nic_activity' must be numeric only",
-        "choices": NIC_ACTIVITY_CHOICES,
-        "choices_message": f"'nic_activity' must be one of: {', '.join(NIC_ACTIVITY_CHOICES)}",
+    #-------------- Nic Codes ---------
+    # Input is grouped by activity: 1=Manufacturing, 2=Services, 3=Trading.
+    # Group key may be "3", "3-trading" or "trading"; it is normalised to "1"/"2"/"3".
+    # nic2/nic4/nic5 accept "45" or "45-Wholesale and retail..." and are reduced to the number.
+    "nic_codes": {
+        "type": dict, "required": True,
+        "key_aliases": NIC_ACTIVITY_KEY_ALIASES,
+        "key_choices": NIC_ACTIVITY_CHOICES,
+        "key_choices_message": f"'nic_codes' keys must be one of: {', '.join(NIC_ACTIVITY_CHOICES)} (1=Manufacturing, 2=Services, 3=Trading)",
+        "each_items": _NIC_CODE_ITEM_SCHEMA,
     },
-    "nic_2_digit_code": {
-        "type": str, "required": True,
-        "extract_number": True,  # accepts "56" or "51-Air Transport"
-        "pattern": _NUMERIC_ONLY_RE,
-        "pattern_message": "'nic2' must be numeric only",
-    },
-    "nic_4_digit_code": {
-        "type": str, "required": True,
-        "extract_number": True,  # accepts "5610" or "5120-Freight air transport"
-        "pattern": _NUMERIC_ONLY_RE,
-        "pattern_message": "'nic4' must be numeric only",
-    },
-    "nic_5_digit_code": {
-        "type": str, "required": True,
-        "extract_number": True,  # accepts "56101" or "51202-Launching of..."
-        "pattern": _NUMERIC_ONLY_RE,
-        "pattern_message": "'nic5' must be numeric only",
-    },
-    
+
     # -------- Employees --------
     "male_employees": {
         "type": str, "required": True,

@@ -1445,6 +1445,39 @@ class AutomationFramework:
                     errors.append(message)
                     continue
 
+            # -------- opt-in: normalise dict KEYS ("3-trading"/"trading" -> "3") --------
+            # `key_aliases` maps names to codes; `key_choices` restricts the final keys.
+            if isinstance(value, dict) and ("key_aliases" in rules or "key_choices" in rules):
+                aliases = rules.get("key_aliases", {})
+                new_value, bad_keys = {}, []
+                for k, v in value.items():
+                    nk = extract_leading_number(str(k).strip())
+                    if not (isinstance(nk, str) and nk.isdigit()):
+                        nk = aliases.get(str(k).strip().lower(), nk)
+                    if "key_choices" in rules and nk not in rules["key_choices"]:
+                        bad_keys.append(str(k))
+                    new_value.setdefault(nk, [])
+                    if isinstance(v, list) and isinstance(new_value[nk], list):
+                        new_value[nk].extend(v)   # merge e.g. "3" and "3-trading"
+                    else:
+                        new_value[nk] = v
+                if bad_keys:
+                    errors.append(rules.get(
+                        "key_choices_message",
+                        f"'{full_name}' has invalid keys: {', '.join(bad_keys)}"))
+                    continue
+                value = new_value
+                data[field] = value
+
+            # -------- opt-in: dict whose every value is a list of dicts --------
+            if "each_items" in rules and isinstance(value, dict):
+                for key, sub_list in value.items():
+                    if not isinstance(sub_list, list) or not sub_list:
+                        errors.append(f"'{full_name}.{key}' must be a non-empty list")
+                        continue
+                    for idx, item in enumerate(sub_list):
+                        errors.extend(cls.validate(item, rules["each_items"], _path=f"{full_name}.{key}[{idx}]"))
+
             if "schema" in rules and isinstance(value, dict):
                 errors.extend(cls.validate(value, rules["schema"], _path=full_name))
 

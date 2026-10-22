@@ -187,7 +187,7 @@ class UdyamRegistration:
         try:
             WebDriverWait(self.driver, 3).until(EC.alert_is_present())
             alert = Alert(self.driver)
-    
+            self.service.add_log(alert.text)
             print("Alert detected:", alert.text)
     
             # Accept alert (OK button)
@@ -934,42 +934,46 @@ class UdyamRegistration:
                 ]
             }
 
+            # NIC activity categories:
+            # 1 = Manufacturing, 2 = Services, 3 = Trading
+
             # nic_codes = self.data["nic_codes"]
 
             for nic_activity, activities in nic_codes.items():
 
-                # Select NIC activity category
-                options = self.driver.find_elements(
-                    By.NAME,
-                    "ctl00$ContentPlaceHolder1$rdbCatggMultiple"
-                )
-
-                for opt in options:
-                    if opt.get_attribute("value") == str(nic_activity):
-                        self.driver.execute_script(
-                            "arguments[0].click();", opt
-                        )
-                        break
-
-                # Scroll to NIC section
-                nic_section = self.wait.until(
-                    EC.presence_of_element_located(
-                        (By.XPATH, "//b[contains(text(),'NIC 2 Digit Code')]")
-                    )
-                )
-
-                self.driver.execute_script(
-                    "arguments[0].scrollIntoView({block:'center'});",
-                    nic_section
-                )
-
-                time.sleep(5)
-                self.service.add_log(
-                    f"NIC activity category {nic_activity} selected"
-                )
-
-                # Loop through each NIC dictionary in this category
                 for activity in activities:
+                    time.sleep(5)
+
+                    # Select category BEFORE EACH NIC ACTIVITY
+                    options = self.driver.find_elements(
+                        By.NAME,
+                        "ctl00$ContentPlaceHolder1$rdbCatggMultiple"
+                    )
+
+                    for opt in options:
+                        if opt.get_attribute("value") == str(nic_activity):
+                            self.driver.execute_script(
+                                "arguments[0].click();", opt
+                            )
+                            break
+
+                    # Scroll to NIC section
+                    nic_section = self.wait.until(
+                        EC.presence_of_element_located(
+                            (By.XPATH, "//b[contains(text(),'NIC 2 Digit Code')]")
+                        )
+                    )
+
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});",
+                        nic_section
+                    )
+
+                    time.sleep(5)
+
+                    self.service.add_log(
+                        f"NIC category {nic_activity} selected"
+                    )
 
                     # Select NIC 2 Digit
                     print("NIC 2 ---> ", activity["nic2"])
@@ -1002,10 +1006,7 @@ class UdyamRegistration:
                         )
                     )
 
-                    self.driver.execute_script(
-                        "arguments[0].scrollIntoView({block:'center'});",
-                        nic4_ele
-                    )
+                    self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});",nic4_ele)
 
                     time.sleep(3)
 
@@ -1051,9 +1052,19 @@ class UdyamRegistration:
                     self.wait_loader_loop()
 
                     self.service.add_log(
-                        f"NIC codes {activity['nic2']}, "
-                        f"{activity['nic4']}, {activity['nic5']} added successfully"
+                        f"NIC activity added successfully: "
+                        f"Category={nic_activity}, "
+                        f"NIC2={activity['nic2']}, "
+                        f"NIC4={activity['nic4']}, "
+                        f"NIC5={activity['nic5']}"
                     )
+
+            self.service.add_log(
+                "All NIC activities processed successfully"
+            )
+
+            self.service.set_progress(82)
+
 
             self.service.add_log("All NIC activities processed successfully")
             self.service.set_progress(82)
