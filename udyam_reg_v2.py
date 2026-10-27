@@ -64,7 +64,7 @@ import numpy as np
 import pytesseract
 from PIL import Image
 import io
-
+import re
 pytesseract.pytesseract.tesseract_cmd = (r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 
 
@@ -201,7 +201,7 @@ class UdyamRegistration:
             pass
     
     def wait_loader_loop(self, timeout=300):
-    
+        
         self.service.add_log("Waiting for loader to disappear")
         start_time = time.time()
         time.sleep(1)
@@ -242,6 +242,27 @@ class UdyamRegistration:
             self.driver.execute_script("arguments[0].click();", choice)    
         # Small self.wait for UI update
         time.sleep(0.5)
+
+    def get_or_fill_input(self, element_id, value="0"):
+        element = self.wait.until(
+            EC.presence_of_element_located((By.ID, element_id))
+        )
+
+        # Fetch the current value, even when disabled
+        current_value = element.get_property("value")
+
+        if element.is_enabled():
+            if value is not None:
+                element.clear()
+                element.send_keys(str(value))
+
+            return element.get_property("value")
+
+        # Disabled input: read-only access
+        print(f"Input is disabled: {element_id}")
+        print(f"Current value: {current_value}")
+
+        return current_value
 
     def udyam_reg_v2(self):
     
@@ -323,6 +344,26 @@ class UdyamRegistration:
             # Click Validate & Generate OTP
             otp_btn = self.wait.until(EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_btnValidateAadhaar")))
             self.driver.execute_script("arguments[0].click();", otp_btn)
+
+            # Check Aadhaar validation error
+            try:
+                error_element = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_lblmsg")))
+
+                error_element = WebDriverWait(self.driver, 30).until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_lblmsg")))
+                error_message = error_element.text.strip()
+
+                if (
+                    "There is error in Aadhaar Validation/Authentication" in error_message
+                    or "Your Aadhaar has not been validated" in error_message
+                ):
+                    raise Exception(
+                        f"Aadhaar validation failed: {error_message}"
+                    )
+
+            except TimeoutException:
+                pass  # Error message did not appear within the wait period
+
+
             self.service.add_log("OTP sent successfully")
     
             # Wait for OTP input
@@ -511,34 +552,56 @@ class UdyamRegistration:
             #  5. Investment in Plant and Machinery OR Equipment (in Rs.)  #
             #                                                              #
             #--------------------------------------------------------------#
-    
+            
     
             # 🔹 Scroll to Investment section (center using first label)
             inv_section = self.wait.until(EC.presence_of_element_located((By.XPATH, "//b[contains(text(),'Written Down Value')]")))
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", inv_section)
             time.sleep(2)
             self.service.add_log("Investment section scrolled to successfully")
-    
+
+            
             # 🔹 Fill Written Down Value (A)
-            wdv_input = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtDepCost")))
-            wdv_input.clear()
-            wdv_input.send_keys(self.data.get("written_down_value","0"))   # example: "200000.00"
-    
-            # 🔹 Fill Exclusion Cost (B)
-            ex_input = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtExCost")))
-            ex_input.clear()
-            ex_input.send_keys(self.data.get("exclusion_cost","0"))   # example: "50000.00"
+            # wdv_input = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtDepCost")))
+            # wdv_input.clear()
+            # wdv_input.send_keys(self.data.get("written_down_value","0"))   # example: "200000.00"
+
+            wdv_value = self.get_or_fill_input(
+                "ctl00_ContentPlaceHolder1_txtDepCost",
+                self.data.get("written_down_value", "0")
+            )
+            time.sleep(1)
+            # # 🔹 Fill Exclusion Cost (B)
+            # ex_input = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtExCost")))
+            # ex_input.clear()
+            # ex_input.send_keys(self.data.get("exclusion_cost","0"))   # example: "50000.00"
+
+            exclusion_value = self.get_or_fill_input(
+                "ctl00_ContentPlaceHolder1_txtExCost",
+                self.data.get("exclusion_cost", "0")
+            )
+            time.sleep(1)
     
             # 🔹 Scroll to Turnover section
             turnover_section = self.wait.until(EC.presence_of_element_located((By.XPATH, "//b[contains(text(),'Total Turnover')]")))
             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", turnover_section)
             time.sleep(1)
     
-            # 🔹 Fill Total Turnover (A)
-            turnover_input = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtTotalTurnoverA")))
-            turnover_input.clear()
-            turnover_input.send_keys(self.data.get("total_turnover","0"))   # example: "300000.00"
-    
+            # # 🔹 Fill Total Turnover (A)
+            # turnover_input = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtTotalTurnoverA")))
+            # turnover_input.clear()
+            # turnover_input.send_keys(self.data.get("total_turnover","0"))   # example: "300000.00"
+
+            turnover_value = self.get_or_fill_input(
+                "ctl00_ContentPlaceHolder1_txtTotalTurnoverA",
+                self.data.get("total_turnover", "0")
+            )
+            time.sleep(1)
+
+            print("WDV:", wdv_value)
+            print("Exclusion Cost:", exclusion_value)
+            print("Total Turnover:", turnover_value)
+            time.sleep(1)
     
             # Click "Continue..." button (Enterprise Details)
     
@@ -637,6 +700,15 @@ class UdyamRegistration:
             district_dropdown.select_by_value(self.data["official_address"]["district"])
             self.wait_loader_loop()
             time.sleep(2)
+
+            try:
+                # 🔹 District Industries Centre
+                dic_dropdown = Select(self.driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_ddlDIC"))
+                dic_dropdown.select_by_value(str(self.data["official_address"]["dic"]))
+            except:
+                pass
+            time.sleep(2)
+            
             self.service.add_log("Official address filled successfully")
             self.service.set_progress(48)
     
@@ -921,23 +993,23 @@ class UdyamRegistration:
             # NIC activity categories:
             # 1 = Manufacturing, 2 = Services, 3 = Trading
 
-            nic_codes = {
-                "1": [
-                    {"nic2": "01", "nic4": "0146", "nic5": "01462"},
-                    {"nic2": "05", "nic4": "0510", "nic5": "05101"}
-                ],
-                "2": [
-                    {"nic2": "49", "nic4": "4911", "nic5": "49110"}
-                ],
-                "3": [
-                    {"nic2": "45", "nic4": "4510", "nic5": "45101"}
-                ]
-            }
+            # nic_codes = {
+            #     "1": [
+            #         {"nic2": "01", "nic4": "0146", "nic5": "01462"},
+            #         {"nic2": "05", "nic4": "0510", "nic5": "05101"}
+            #     ],
+            #     "2": [
+            #         {"nic2": "49", "nic4": "4911", "nic5": "49110"}
+            #     ],
+            #     "3": [
+            #         {"nic2": "45", "nic4": "4510", "nic5": "45101"}
+            #     ]
+            # }
 
             # NIC activity categories:
             # 1 = Manufacturing, 2 = Services, 3 = Trading
 
-            # nic_codes = self.data["nic_codes"]
+            nic_codes = self.data["nic_codes"]
 
             for nic_activity, activities in nic_codes.items():
 
@@ -1150,7 +1222,13 @@ class UdyamRegistration:
             time.sleep(1)
             self.service.add_log("Radio Buttons are Selected in Randomly")
             self.service.set_progress(94)
-    
+
+
+
+            input("1111...")
+            input("1111...")
+            input("1111...")
+            input("1111...")
             # # 🔹 Scroll to top (optional)
             # self.driver.execute_script("window.scrollTo(0, 0)")
             # time.sleep(1)
@@ -1203,7 +1281,7 @@ class UdyamRegistration:
             # -----------------------------
             captcha_obj = UdyamRegistration_captcha(driver=self.driver,wait=self.wait)
             captcha_solve=False
-            otp_attempts=3
+            # otp_attempts=3
             otp_attempts = 0
 
             while not captcha_solve:
@@ -1214,7 +1292,7 @@ class UdyamRegistration:
                 # raises OTPTimeoutError on a real timeout.
                 otp_value = self.service.wait_for_otp(
                     otp_type="otp",
-                    timeout=280,
+                    timeout=1500,
                     poll_interval=2,
                     driver=self.driver,
                 )
@@ -1248,58 +1326,57 @@ class UdyamRegistration:
     
                 # Handle alert after click
                 self.handle_alert()
-    
-                time.sleep(5)
-                
+                print("Alert 1")
+                time.sleep(4)
                 try:
-                    otp_error = WebDriverWait(self.driver, 2).until(
-                        EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_lblMssgg"))
-                    )
-
-                    if "Your OTP Number is Wrong." in otp_error.text:
-                        otp_attempts += 1
-
-                        if otp_attempts >= 3:
-                            raise Exception("3 OTP attempts are over. Restart the automation.")
-
-                        WebDriverWait(self.driver, 5).until(
-                            EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_btnsubmit"))
-                        ).click()
-
-                        time.sleep(4)
-
-                        alert = WebDriverWait(self.driver, 10).until(lambda d: d.switch_to.alert)
-
-                        print(alert.text)  # Are you sure that you have entered correct data...
-
-                        alert.accept()   
-
-                        continue
-
-                except TimeoutException:
-                    # OTP accepted
+                    alert = WebDriverWait(self.driver, 5).until(EC.alert_is_present())
+                    print("Second Alert:", alert.text)
+                    import re
+                    # Extract Registration Number
+                    match = re.search(r"UDYAM-[A-Z]{2}-\d+", alert.text)
+                    if match:
+                        print("Registration Number:", match.group())
+                        self.service.add_log(f"Registration Number: {match.group()}")
                     break
-    
-                # -----------------------------
-                # STEP 5: Check Captcha Error
-                # -----------------------------
-                try:
-                    WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.XPATH, "//span[@id='ctl00_ContentPlaceHolder1_lblCaptcha']"))) #//div[@id='ctl00_ContentPlaceHolder1_divcaptcha1'] 
-                    error_msg = self.driver.find_element(By.XPATH,"//span[@id='ctl00_ContentPlaceHolder1_lblCaptcha']").text.strip()
-    
-                    if "Incorrect verification code" in error_msg:
-                        print("Captcha incorrect. Refreshing captcha...")
-    
-                        refresh_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='ctl00_ContentPlaceHolder1_ImgRefresh']")))
-                        self.driver.execute_script("""arguments[0].scrollIntoView({behavior: 'instant',block: 'center',inline: 'center'});""", refresh_btn)
-                        time.sleep(2)
-                        refresh_btn.click()
-                        time.sleep(2)
-                        continue
-                    else :
-                        captcha_solve = True
                 except Exception as e:
-                    print(e)    
+                    try:
+                        otp_error = WebDriverWait(self.driver, 2).until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_lblMssgg")))
+                        print("OTP ERROR text",otp_error.text)
+                        if "Your OTP Number is Wrong." in otp_error.text:
+                            otp_attempts += 1
+                            if otp_attempts >= 5:
+                                raise Exception("5 OTP attempts are over May Be Portal Issue.So, Restart the automation.")
+                            WebDriverWait(self.driver, 5).until(EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_btnsubmit"))).click()
+                            time.sleep(4)
+                            alert = WebDriverWait(self.driver, 10).until(lambda d: d.switch_to.alert)
+                            print("Alert text 2:",alert.text)  # Are you sure that you have entered correct data...
+                            alert.accept()   
+                            continue
+                    except TimeoutException:
+                        # OTP accepted
+                        print("OTP accepted")
+                        break
+                    print("Check Captcha Error")
+                    # -----------------------------
+                    # STEP 5: Check Captcha Error
+                    # -----------------------------
+                    try:
+                        WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.XPATH, "//span[@id='ctl00_ContentPlaceHolder1_lblCaptcha']"))) #//div[@id='ctl00_ContentPlaceHolder1_divcaptcha1'] 
+                        error_msg = self.driver.find_element(By.XPATH,"//span[@id='ctl00_ContentPlaceHolder1_lblCaptcha']").text.strip()
+        
+                        if "Incorrect verification code" in error_msg:
+                            print("Captcha incorrect. Refreshing captcha...")
+        
+                            refresh_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='ctl00_ContentPlaceHolder1_ImgRefresh']")))
+                            self.driver.execute_script("""arguments[0].scrollIntoView({behavior: 'instant',block: 'center',inline: 'center'});""", refresh_btn)
+                            time.sleep(2)
+                            refresh_btn.click()
+                            time.sleep(2)
+                            continue
+                        else :
+                            captcha_solve = True
+                    except Exception as e:
+                        print(e)    
                 print("Form submitted successfully!")  
             # time.sleep(5)
 
@@ -1317,9 +1394,13 @@ class UdyamRegistration:
             # Click OK on second alert
             alert.accept()            
             udyam_no = WebDriverWait(self.driver, 20).until(lambda d: d.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblmsg").text.strip() != "")
-            print(self.driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblmsg").text)
+            udyam_no_page=self.driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblmsg").text
             # input("Press Enter after filling the form...")
             time.sleep(5)
+            match = re.search(r"UDYAM-[A-Z]{2}-\d+", udyam_no_page)
+            if match:
+                print("Registration Number:", match.group())
+                self.service.add_log(f"Registration Number: {match.group()}")
             
             # ---------------------------------------
             # Success
@@ -1368,6 +1449,15 @@ class UdyamRegistration:
                 level="ERROR",
                 screenshot=screenshot_base64,
             )
+            # udyam_no = WebDriverWait(self.driver, 20).until(lambda d: d.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblmsg").text.strip() != "")
+            # udyam_no_page=self.driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblmsg").text
+            # # input("Press Enter after filling the form...")
+            # time.sleep(5)
+            # match = re.search(r"UDYAM-[A-Z]{2}-\d+", udyam_no_page)
+            # if match:
+            #     print("Registration Number:", match.group())
+            #     self.service.add_log(f"Registration Number: {match.group()}")
+                        
             input("1...") 
             input("2...") 
             input("1...") 

@@ -64,7 +64,7 @@ _SINGLE_ALPHA_RE    = re.compile(r"^[A-Za-z]$")                # exactly one alp
 _UDYAM_RE           = re.compile(r"^UDYAM-[A-Z]{2}-\d{2}-\d{7}$")  # e.g. UDYAM-KR-06-0043268
 
 
-_ADDRESS_SCHEMA = {
+OFFICIAL_ADDRESS_SCHEMA = {
     "flat":     {"type": str, "required": True},
     "building": {"type": str, "required": False},
     "village":  {"type": str, "required": False},
@@ -77,12 +77,41 @@ _ADDRESS_SCHEMA = {
         "pattern_message": "'pin' must be exactly 6 digits",
     },
     "state": {
-        "type": str, "required": True,
+        "type": str, "required": True, "extract_number": True,
         "pattern": _NUMERIC_ONLY_RE,
         "pattern_message": "'state' must be numeric only",
     },
     "district": {
+        "type": str, "required": True, "extract_number": True,
+        "pattern": _NUMERIC_ONLY_RE,
+        "pattern_message": "'district' must be numeric only",
+    },
+    "dic": {
+            "type": str, "required": False, "extract_number": True,
+            "pattern": _NUMERIC_ONLY_RE,
+            "pattern_message": "District Industries Centre that means dic must be numeric only",
+        },
+}
+
+UNIT_ADDRESS_SCHEMA = {
+    "flat":     {"type": str, "required": True},
+    "building": {"type": str, "required": False},
+    "village":  {"type": str, "required": False},
+    "block":    {"type": str, "required": False},
+    "road":     {"type": str, "required": False},
+    "city":     {"type": str, "required": True},
+    "pin": {
         "type": str, "required": True,
+        "pattern": _PIN_6_RE,
+        "pattern_message": "'pin' must be exactly 6 digits",
+    },
+    "state": {
+        "type": str, "required": True, "extract_number": True,
+        "pattern": _NUMERIC_ONLY_RE,
+        "pattern_message": "'state' must be numeric only",
+    },
+    "district": {
+        "type": str, "required": True, "extract_number": True,
         "pattern": _NUMERIC_ONLY_RE,
         "pattern_message": "'district' must be numeric only",
     },
@@ -155,7 +184,7 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
     },
     "pan_name": {
         "type": str, "required": True,
-        "pattern": _ALPHA_ONLY_RE,
+        # "pattern": _ALPHA_ONLY_RE,
         "pattern_message": "'pan_name' must contain alphabetic characters only",
     },
     "date_of_birth": {
@@ -229,9 +258,9 @@ CATEGORY_CHOICES = ["0", "1", "2", "3"]
     },
 
     # -------- Addresses (nested — validated field by field) --------
-    "official_address": {"type": dict, "required": True, "schema": _ADDRESS_SCHEMA},
+    "official_address": {"type": dict, "required": True, "schema": OFFICIAL_ADDRESS_SCHEMA},
     # units is a dict of UNKNOWN keys (unit names), each shaped like an address
-    "units": {"type": dict, "required": True, "each": _ADDRESS_SCHEMA},
+    "units": {"type": dict, "required": True, "each": UNIT_ADDRESS_SCHEMA},
 
     # -------- Status of Enterprise --------
     "em_ii_uam_no": {
