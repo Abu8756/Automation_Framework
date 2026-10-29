@@ -49,8 +49,8 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import TimeoutException
-from selenium.common.exceptions import TimeoutException, NoAlertPresentException, NoSuchElementException
-
+from selenium.common.exceptions import TimeoutException, NoAlertPresentException, NoSuchElementException , UnexpectedAlertPresentException
+ 
 from selenium.webdriver.common.alert import Alert
 import random
 import time
@@ -182,6 +182,28 @@ class UdyamRegistration:
         self.session_id = service.session_id  # read-only, handy for log text
         self.driver = None
 
+    def _wait_submit_outcome(self, timeout=15):
+        """Returns ('success', alert) | ('otp_wrong', None) | ('captcha_wrong', None) | ('unknown', None)"""
+        end = time.time() + timeout
+        while time.time() < end:
+            # Second alert = success. Check it first, because an open alert blocks find_element.
+            try:
+                return "success", self.driver.switch_to.alert
+            except NoAlertPresentException:
+                pass
+
+            try:
+                for el in self.driver.find_elements(By.ID, "ctl00_ContentPlaceHolder1_lblMssgg"):
+                    if el.is_displayed() and "OTP Number is Wrong" in el.text:
+                        return "otp_wrong", None
+                for el in self.driver.find_elements(By.ID, "ctl00_ContentPlaceHolder1_lblCaptcha"):
+                    if el.is_displayed() and "Incorrect verification code" in el.text:
+                        return "captcha_wrong", None
+            except UnexpectedAlertPresentException:
+                continue   # alert popped up mid-check, next pass returns success
+            time.sleep(0.5)
+        return "unknown", None
+    
     def handle_alert(self):
     
         try:
@@ -244,9 +266,7 @@ class UdyamRegistration:
         time.sleep(0.5)
 
     def get_or_fill_input(self, element_id, value="0"):
-        element = self.wait.until(
-            EC.presence_of_element_located((By.ID, element_id))
-        )
+        element = self.wait.until(EC.presence_of_element_located((By.ID, element_id)))
 
         # Fetch the current value, even when disabled
         current_value = element.get_property("value")
@@ -347,9 +367,9 @@ class UdyamRegistration:
 
             # Check Aadhaar validation error
             try:
-                error_element = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_lblmsg")))
+                # error_element = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_lblmsg")))
 
-                error_element = WebDriverWait(self.driver, 30).until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_lblmsg")))
+                error_element = WebDriverWait(self.driver, 20).until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_lblmsg")))
                 error_message = error_element.text.strip()
 
                 if (
@@ -381,7 +401,7 @@ class UdyamRegistration:
             # OTPTimeoutError so this run fails cleanly and can be retried.
             OTP = self.service.wait_for_otp(
                 otp_type="otp",
-                timeout=280,
+                timeout=1500,
                 poll_interval=2,
                 driver=self.driver,
             )
@@ -444,11 +464,13 @@ class UdyamRegistration:
             pan_name.clear()
             pan_name.send_keys(self.data["pan_name"])
             time.sleep(1)
-    
+        
             # 🔹 Fill DOB / DOI (letter by letter format DD/MM/YYYY)
+            date_value = self.data["date_of_birth"] if str(self.data.get("org_value")) in ("1", "2") else self.data["incorporation_date"]
+            
             dob_input = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtdob")))
             dob_input.clear()
-            for ch in self.data["date_of_birth"]:
+            for ch in date_value:
                 dob_input.send_keys(ch)
                 time.sleep(0.1)
             time.sleep(1)
@@ -834,6 +856,8 @@ class UdyamRegistration:
                 if opt.get_attribute("value") == str(self.data["commenced_operations"]):
                     self.driver.execute_script("arguments[0].click();", opt)
                     break
+            time.sleep(3)
+            self.wait_loader_loop()
     
             # 🔹 If Yes → fill Date of Commencement
             if str(self.data["commenced_operations"]) == "1":
@@ -1275,132 +1299,160 @@ class UdyamRegistration:
             time.sleep(2)
             self.wait_loader_loop()
             time.sleep(2)         
-    
             # -----------------------------
-            # STEP 3: Captcha Loop
+            # STEP 3: OTP + Captcha + Final Submit loop
             # -----------------------------
-            captcha_obj = UdyamRegistration_captcha(driver=self.driver,wait=self.wait)
-            captcha_solve=False
-            # otp_attempts=3
+            captcha_obj = UdyamRegistration_captcha(driver=self.driver, wait=self.wait)
+
+            need_otp = True        # fetch a fresh OTP on the next pass
+            need_captcha = True    # fetch + solve a fresh captcha on the next pass
             otp_attempts = 0
+            captcha_attempts = 0
+            MAX_OTP_ATTEMPTS = 5
+            MAX_CAPTCHA_ATTEMPTS = 10
 
-            while not captcha_solve:
+            while True:
 
-                # Wait for the final-submit OTP (OTP #2) to arrive on the
-                # session. Same wait_for_otp() semantics as the Aadhaar OTP
-                # above — discards malformed values, quits the driver and
-                # raises OTPTimeoutError on a real timeout.
-                otp_value = self.service.wait_for_otp(
-                    otp_type="otp",
-                    timeout=1500,
-                    poll_interval=2,
-                    driver=self.driver,
-                )
+                # ---- OTP (only when needed) ----
+                if need_otp:
+                    # drop any stale OTP held by the service before waiting for a new one
+                    if hasattr(self.service, "clear_otp"):
+                        self.service.clear_otp(otp_type="otp")
 
-                otp_input = self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtOtp")))
-                otp_input.clear()
-                otp_input.send_keys(otp_value)
+                    otp_value = self.service.wait_for_otp(
+                        otp_type="otp",
+                        timeout=1500,
+                        poll_interval=2,
+                        driver=self.driver,
+                    )
+                    otp_input = self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtOtp")))
+                    otp_input.clear()
+                    otp_input.send_keys(otp_value)
+                    need_otp = False
 
-                # captcha_path = self.save_captcha()
-                captcha_value = captcha_obj.udyam_reg_captcha_resolve()
-                print("Captcha value : ",captcha_value)
-                captcha_input = self.wait.until(EC.presence_of_element_located((By.XPATH, "//input[@id='ctl00_ContentPlaceHolder1_txtCaptcha']")))
-                captcha_input.clear()
-                captcha_input.send_keys(captcha_value)
-                time.sleep(2)
-                final_submit = self.wait.until(EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_btn_finalsubmit")))
-
-                # Scroll element to the center
-                self.driver.execute_script("""
-                    arguments[0].scrollIntoView({
-                        behavior: 'smooth',
-                        block: 'center'
-                    });
-                """, final_submit)
+                # ---- Captcha (only when needed) ----
+                if need_captcha:
+                    captcha_value = captcha_obj.udyam_reg_captcha_resolve()   # reads the current captcha image
+                    print("Captcha value : ", captcha_value)
+                    captcha_input = self.wait.until(EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtCaptcha")))
+                    captcha_input.clear()
+                    captcha_input.send_keys(captcha_value)
+                    need_captcha = False
 
                 time.sleep(1)
-
-                # Click
+                input("Final BUTTOn")
+                input("Final BUTTOn")
+                # ---- Final submit ----
+                final_submit = self.wait.until(EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_btn_finalsubmit")))
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({behavior:'instant',block:'center'});", final_submit)
+                time.sleep(1)
                 final_submit.click()
                 time.sleep(2)
-    
-                # Handle alert after click
+
+                # First alert -> OK
                 self.handle_alert()
-                print("Alert 1")
-                time.sleep(4)
-                try:
-                    alert = WebDriverWait(self.driver, 5).until(EC.alert_is_present())
+                print("Alert 1 accepted")
+
+                # ---- What happened? ----
+                outcome, alert = self._wait_submit_outcome(timeout=15)
+                print("Submit outcome:", outcome)
+
+                # 1) SUCCESS: second alert -> log registration number -> break
+                if outcome == "success":
                     print("Second Alert:", alert.text)
-                    import re
-                    # Extract Registration Number
-                    match = re.search(r"UDYAM-[A-Z]{2}-\d+", alert.text)
+                    # match = re.search(r"UDYAM-[A-Z]{2}-\d+", alert.text)
+                    match = re.search(r"UDYAM-[A-Z]{2}-\d{7}", alert.text)
                     if match:
-                        print("Registration Number:", match.group())
-                        self.service.add_log(f"Registration Number: {match.group()}")
+                        udyam_number = match.group()
+                        print("Registration Number:", udyam_number)
+                        self.service.add_log(f"Registration Number: {udyam_number}")
+                    alert.accept()
                     break
-                except Exception as e:
-                    try:
-                        otp_error = WebDriverWait(self.driver, 2).until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_lblMssgg")))
-                        print("OTP ERROR text",otp_error.text)
-                        if "Your OTP Number is Wrong." in otp_error.text:
-                            otp_attempts += 1
-                            if otp_attempts >= 5:
-                                raise Exception("5 OTP attempts are over May Be Portal Issue.So, Restart the automation.")
-                            WebDriverWait(self.driver, 5).until(EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_btnsubmit"))).click()
-                            time.sleep(4)
-                            alert = WebDriverWait(self.driver, 10).until(lambda d: d.switch_to.alert)
-                            print("Alert text 2:",alert.text)  # Are you sure that you have entered correct data...
-                            alert.accept()   
-                            continue
-                    except TimeoutException:
-                        # OTP accepted
-                        print("OTP accepted")
-                        break
-                    print("Check Captcha Error")
-                    # -----------------------------
-                    # STEP 5: Check Captcha Error
-                    # -----------------------------
-                    try:
-                        WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.XPATH, "//span[@id='ctl00_ContentPlaceHolder1_lblCaptcha']"))) #//div[@id='ctl00_ContentPlaceHolder1_divcaptcha1'] 
-                        error_msg = self.driver.find_element(By.XPATH,"//span[@id='ctl00_ContentPlaceHolder1_lblCaptcha']").text.strip()
-        
-                        if "Incorrect verification code" in error_msg:
-                            print("Captcha incorrect. Refreshing captcha...")
-        
-                            refresh_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='ctl00_ContentPlaceHolder1_ImgRefresh']")))
-                            self.driver.execute_script("""arguments[0].scrollIntoView({behavior: 'instant',block: 'center',inline: 'center'});""", refresh_btn)
-                            time.sleep(2)
-                            refresh_btn.click()
-                            time.sleep(2)
-                            continue
-                        else :
-                            captcha_solve = True
-                    except Exception as e:
-                        print(e)    
-                print("Form submitted successfully!")  
+                # 2) WRONG OTP: resend OTP, then fresh OTP + fresh captcha
+                if outcome == "otp_wrong":
+                    otp_attempts += 1
+                    if otp_attempts >= MAX_OTP_ATTEMPTS:
+                        raise Exception("5 OTP attempts are over. May be portal issue, restart the automation.")
+                    self.service.add_log(f"OTP wrong, resending OTP (attempt {otp_attempts})")
+
+                    resend_btn = WebDriverWait(self.driver, 10).until(
+                        EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_btnsubmit")))
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({behavior:'instant',block:'center'});", resend_btn)
+                    resend_btn.click()
+                    time.sleep(3)
+                    confirm = WebDriverWait(self.driver, 10).until(EC.alert_is_present())
+                    print("Resend alert:", confirm.text)
+                    confirm.accept()
+                    time.sleep(2)
+                    self.wait_loader_loop()
+                    time.sleep(2)
+
+                    need_otp = True
+                    need_captcha = True
+                    continue
+
+                # 3) WRONG CAPTCHA: do NOT touch OTP, refresh captcha only
+                if outcome == "captcha_wrong":
+                    captcha_attempts += 1
+                    if captcha_attempts >= MAX_CAPTCHA_ATTEMPTS:
+                        raise Exception("Captcha failed too many times, restart the automation.")
+                    print("Captcha incorrect. Refreshing captcha...")
+
+                    refresh_btn = self.wait.until(EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_ImgRefresh")))
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({behavior:'instant',block:'center'});", refresh_btn)
+                    time.sleep(1)
+                    refresh_btn.click()
+                    time.sleep(2)
+
+                    need_otp = False      # keep the OTP already typed in
+                    need_captcha = True
+                    continue
+
+                # unknown result -> don't guess, fail loudly
+                raise Exception("Unknown result after final submit. Check the page.")
+
+            # Read the Udyam number from the success page
+            WebDriverWait(self.driver, 20).until(
+                lambda d: d.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblmsg").text.strip() != "")
+            udyam_no_page = self.driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblmsg").text
+            # match = re.search(r"UDYAM-[A-Z]{2}-\d+", udyam_no_page)
+            # if match:
+            #     print("Registration Number:", match.group())
+            #     self.service.add_log(f"Registration Number: {match.group()}")
+            # udyam_no = str(match.group())
+
+            # match = re.search(r"UDYAM-[A-Z]{2}-\d+", udyam_no_page)
+            match = re.search(r"UDYAM-[A-Z]{2}-\d{7}", alert.text)
+            if not match:
+                raise Exception(f"Registration submitted but number not found on page: {udyam_no_page!r}")
+            udyam_no = match.group()
+            print("Registration Number:", udyam_no)
+            self.service.add_log(f"Registration Number: {udyam_no}")
+
+            # # ---------------- Second Alert ----------------
+            # alert = self.wait.until(EC.alert_is_present())
+
+            # print("Second Alert:", alert.text)
+            # import re
+            # # Extract Registration Number
+            # match = re.search(r"UDYAM-[A-Z]{2}-\d+", alert.text)
+            # if match:
+            #     print("Registration Number:", match.group())
+            #     self.service.add_log(f"Registration Number: {match.group()}")
+
+            # # Click OK on second alert
+            # alert.accept()            
+            # udyam_no = WebDriverWait(self.driver, 20).until(lambda d: d.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblmsg").text.strip() != "")
+            # udyam_no_page=self.driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblmsg").text
+            # # input("Press Enter after filling the form...")
             # time.sleep(5)
-
-            # ---------------- Second Alert ----------------
-            alert = self.wait.until(EC.alert_is_present())
-
-            print("Second Alert:", alert.text)
-            import re
-            # Extract Registration Number
-            match = re.search(r"UDYAM-[A-Z]{2}-\d+", alert.text)
-            if match:
-                print("Registration Number:", match.group())
-                self.service.add_log(f"Registration Number: {match.group()}")
-
-            # Click OK on second alert
-            alert.accept()            
-            udyam_no = WebDriverWait(self.driver, 20).until(lambda d: d.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblmsg").text.strip() != "")
-            udyam_no_page=self.driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblmsg").text
-            # input("Press Enter after filling the form...")
-            time.sleep(5)
-            match = re.search(r"UDYAM-[A-Z]{2}-\d+", udyam_no_page)
-            if match:
-                print("Registration Number:", match.group())
-                self.service.add_log(f"Registration Number: {match.group()}")
+            # match = re.search(r"UDYAM-[A-Z]{2}-\d+", udyam_no_page)
+            # if match:
+            #     print("Registration Number:", match.group())
+            #     self.service.add_log(f"Registration Number: {match.group()}")
             
             # ---------------------------------------
             # Success
@@ -1440,9 +1492,7 @@ class UdyamRegistration:
                 try:
                     screenshot_base64 = self.driver.get_screenshot_as_base64()
                 except Exception as screenshot_error:
-                    self.service.add_log(
-                        f"Could not capture error screenshot: {screenshot_error}", level="ERROR"
-                    )
+                    self.service.add_log(f"Could not capture error screenshot: {screenshot_error}", level="ERROR")
 
             self.service.add_log(
                 f"Automation failed: {error_text}",

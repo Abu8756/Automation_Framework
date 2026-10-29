@@ -39,21 +39,11 @@ DEBUG_DIR = "debug_html"
 os.makedirs(DEBUG_DIR, exist_ok=True)
 
 MAX_OTP_VERIFY_ATTEMPTS = 4
-OTP_TIMEOUT_SECONDS = 180.0
+OTP_TIMEOUT_SECONDS = 550.0
 
-# Loaded once per process, the first time this module is imported (lazily,
-# from inside UdyamCertificateService.run()) — same cost/behaviour as the
-# original Flask app's module-level `reader = easyocr.Reader(...)`.
+
 print("Initializing EasyOCR reader...")
 reader = easyocr.Reader(["en"], gpu=False)
-
-
-# ---------------------------------------------------------------------------
-# Same JS-driven helpers as the original file: captcha is fetched from
-# inside the browser via fetch(), form fields are filled and buttons are
-# clicked via execute_script(), and the ASP.NET postback does the actual
-# navigation.
-# ---------------------------------------------------------------------------
 
 JS_FETCH_IMAGE_AS_BASE64 = """
 const callback = arguments[arguments.length - 1];
@@ -137,10 +127,7 @@ def _js_get_message(driver):
 
 
 class UdyamCertificate:
-    """One instance per automation run. `service` is the AutomationService
-    the framework created for this session — it's the only thing this class
-    talks to for logging, progress, and OTP (no Flask, no session dict, no
-    reaper thread of its own; the framework already provides all of that)."""
+
 
     def __init__(self, data: dict, service):
         self.data = data
