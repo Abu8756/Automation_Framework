@@ -334,6 +334,10 @@ _FILTER_FIELDS = ("session_id", "service", "request_type", "method")
 _LIST_COLUMNS = ("request_id", "timestamp", "ts_ms", "session_id", "service", "request_type",
                  "method", "path", "url", "status_code", "duration_ms", "client_ip", "size")
 _ALLOWED_ORIGIN = "https://indiafilings-tau.vercel.app"
+# Per-session log trail (the add_log() lines) -- its OWN OpenSearch index and its OWN
+# SQLite file, one document/row per session_id (session_id is the unique id in both).
+_SESSION_LOG_INDEX = "automation_session_logs"
+_MAX_SESSION_LOG_CHARS = 2_000_000
 
 
 def _utc_now_parts():
@@ -693,6 +697,168 @@ class RequestLogStore:
 
 
 # ======================================================================
+# Session log store  (feature: "Logs" button in DevTools -> popup)
+#
+#   * Separate from the API request log above: its OWN OpenSearch index
+#     (_SESSION_LOG_INDEX) and its OWN SQLite file (logs/session_logs.db).
+#   * ONE document / row per session_id -- session_id is the unique id
+#     (OpenSearch _id and SQLite PRIMARY KEY) -- holding every add_log() line.
+#   * Same rule as the request log: OpenSearch first, SQLite when it is down.
+#   * Writes happen on a background thread and are coalesced per session, so
+#     a slow/down OpenSearch never slows the automation.
+# ======================================================================
+class _SessionLogOpenSearch(_OpenSearchStore):
+    def ensure_index(self):
+        try:
+            self._call("GET", f"/{self.index}")
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+            self._call("PUT", f"/{self.index}", {
+                "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+                "mappings": {"dynamic": False, "properties": {
+                    "session_id": {"type": "keyword"},
+                    "service":    {"type": "keyword"},
+                    "created_at": {"type": "keyword"},
+                    "updated_ms": {"type": "long"},
+                    "count":      {"type": "integer"},
+                    # the log lines are kept as unindexed JSON text, still in _source
+                    "logs":       {"type": "keyword", "index": False, "doc_values": False},
+                }},
+            })
+
+    def save(self, doc):
+        self._call("PUT", f"/{self.index}/_doc/{urllib.parse.quote(doc['session_id'], safe='')}", doc)
+
+    def get(self, session_id):
+        try:
+            return self._call("GET", f"/{self.index}/_doc/{urllib.parse.quote(session_id, safe='')}").get("_source")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raise
+
+
+class _SessionLogSQLite(_SQLiteStore):
+    def __init__(self, path):
+        self.path = path
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        self._exec("""CREATE TABLE IF NOT EXISTS session_logs (
+            session_id TEXT PRIMARY KEY, service TEXT, created_at TEXT,
+            updated_ms INTEGER, count INTEGER, logs TEXT)""")
+
+    def save(self, doc):
+        cols = ("session_id", "service", "created_at", "updated_ms", "count", "logs")
+        self._exec(f"INSERT OR REPLACE INTO session_logs ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                   [doc.get(c) for c in cols])
+
+    def get(self, session_id):
+        rows = self._exec("SELECT * FROM session_logs WHERE session_id = ?", [session_id], fetch=True)
+        return rows[0] if rows else None
+
+
+class SessionLogStore:
+    def __init__(self, sqlite_path, opensearch_url=None, index=_SESSION_LOG_INDEX, user=None,
+                 password=None, verify_ssl=True, retry_seconds=30.0):
+        self.sqlite = _SessionLogSQLite(sqlite_path)
+        self.sqlite_path = sqlite_path
+        self.index = index
+        self.opensearch_url = opensearch_url
+        self.os = _SessionLogOpenSearch(opensearch_url, index, user, password, verify_ssl) if opensearch_url else None
+        self._retry_seconds = retry_seconds
+        self._os_ok = False
+        self._os_checked_at = 0.0
+        self._pending = {}                      # session_id -> newest doc (older unsent ones are replaced)
+        self._pending_lock = threading.Lock()
+        self._wake = threading.Event()
+        if self.os:
+            print(f"[session-log] OpenSearch index '{index}' {'ready' if self.opensearch_available() else 'NOT reachable'}; "
+                  f"fallback SQLite: {sqlite_path}")
+        else:
+            print(f"[session-log] OpenSearch disabled; using SQLite: {sqlite_path}")
+        threading.Thread(target=self._worker, daemon=True, name="session-log-writer").start()
+
+    # -- availability ---------------------------------------------------
+    def opensearch_available(self) -> bool:
+        if not self.os:
+            return False
+        if self._os_ok:
+            return True
+        if time.time() - self._os_checked_at < self._retry_seconds:
+            return False
+        self._os_checked_at = time.time()
+        try:
+            self.os.ping()
+            self.os.ensure_index()
+            self._os_ok = True
+        except Exception:
+            self._os_ok = False
+        return self._os_ok
+
+    def _mark_os_down(self):
+        self._os_ok = False
+        self._os_checked_at = time.time()
+
+    # -- write path -----------------------------------------------------
+    @staticmethod
+    def _build_doc(session_id, service, created_at, logs):
+        logs = list(logs)
+        text = json.dumps(logs, ensure_ascii=False, default=str)
+        while len(text) > _MAX_SESSION_LOG_CHARS and len(logs) > 1:      # keep the newest lines
+            logs = logs[max(1, len(logs) // 10):]
+            text = json.dumps(logs, ensure_ascii=False, default=str)
+        return {"session_id": session_id, "service": service, "created_at": created_at,
+                "updated_ms": int(time.time() * 1000), "count": len(logs), "logs": text}
+
+    def save(self, session_id, service, created_at, logs):
+        doc = self._build_doc(session_id, service, created_at, logs)
+        with self._pending_lock:
+            self._pending[session_id] = doc
+            self._wake.set()
+
+    def _worker(self):
+        while True:
+            self._wake.wait()
+            with self._pending_lock:
+                batch, self._pending = self._pending, {}
+                self._wake.clear()
+            for doc in batch.values():
+                try:
+                    if self.opensearch_available():
+                        try:
+                            self.os.save(doc)
+                            continue
+                        except Exception:
+                            self._mark_os_down()
+                    self.sqlite.save(doc)
+                except Exception:
+                    traceback.print_exc()
+
+    # -- read path ------------------------------------------------------
+    def get(self, session_id):
+        """Newest copy of this session's logs (OpenSearch and SQLite are both
+        checked, so lines written to SQLite while OpenSearch was down are not lost)."""
+        found = []
+        if self.opensearch_available():
+            try:
+                doc = self.os.get(session_id)
+                if doc:
+                    found.append(dict(doc, storage="opensearch"))
+            except Exception:
+                self._mark_os_down()
+        doc = self.sqlite.get(session_id)
+        if doc:
+            found.append(dict(doc, storage="sqlite"))
+        if not found:
+            return None
+        best = max(found, key=lambda d: (d.get("count") or 0, d.get("updated_ms") or 0))
+        best["logs"] = _parse_json_text(best.get("logs")) or []
+        return best
+
+
+# ======================================================================
 # DevTools-style network viewer, served at GET /devtools
 # (all dynamic text is inserted with textContent -- never innerHTML --
 #  because payloads/responses are untrusted data)
@@ -766,6 +932,23 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;font-size:12px;line-heig
 .k{color:var(--info)}.str{color:var(--str)}.num{color:var(--num)}.kw{color:var(--kw)}
 dl{display:grid;grid-template-columns:120px 1fr;gap:7px 12px;margin:0}dt{color:var(--mut)}dd{margin:0;word-break:break-all}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--tx);color:var(--bg);padding:6px 14px;border-radius:99px;font-size:12px;opacity:0;pointer-events:none;transition:opacity .2s}.toast.on{opacity:1}
+/* session-log popup */
+.logbtn{background:#d6ecff;color:#0b5cad;border:1px solid #9fd0ff;border-radius:6px;font-size:12px;font-weight:600;padding:2px 10px;cursor:pointer}
+.logbtn:hover{background:#bfe0ff;color:#084a8c}
+.ovl{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55);padding:16px}
+.win{width:min(920px,100%);height:min(82vh,740px);display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--bd);border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.45);overflow:hidden}
+.whead{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--bd);background:var(--panel2)}
+.whead .wt{font-weight:700}
+.wbody{flex:1;overflow:auto;padding:6px 14px}
+.wfoot{padding:7px 14px;border-top:1px solid var(--bd);font-size:12px}
+.le{display:grid;grid-template-columns:150px 62px 1fr;gap:10px;padding:6px 0;border-bottom:1px solid var(--bd);align-items:start}
+.le .lt{font-size:11.5px;color:var(--mut);white-space:nowrap}
+.le .lm{white-space:pre-wrap;word-break:break-word;font-size:12.5px}
+.lv{display:inline-block;text-align:center;font-size:10.5px;font-weight:700;padding:1px 6px;border-radius:4px;color:var(--info);background:color-mix(in srgb,var(--info) 14%,transparent)}
+.lv-ERROR,.lv-CRITICAL{color:var(--err);background:color-mix(in srgb,var(--err) 16%,transparent)}
+.lv-WARNING,.lv-WARN{color:var(--warn);background:color-mix(in srgb,var(--warn) 16%,transparent)}
+.le.lerr .lm{color:var(--err)}
+.le a{color:var(--acc)}
 [hidden]{display:none!important}
 </style></head><body>
 <header>
@@ -798,7 +981,7 @@ dl{display:grid;grid-template-columns:120px 1fr;gap:7px 12px;margin:0}dt{color:v
 <div class="main">
   <div class="list" id="list">
     <table><thead><tr>
-      <th>Time</th><th>Method</th><th>Name</th><th>Status</th><th>Type</th><th>Service</th><th>Session</th><th>Duration</th><th>Size</th><th></th>
+      <th>Time</th><th>Method</th><th>Name</th><th>Status</th><th>Type</th><th>Service</th><th>Session</th><th>Duration</th><th>Size</th><th>Logs</th><th></th>
     </tr></thead><tbody id="rows"></tbody></table>
     <div id="empty" class="empty" hidden>No requests match the current filters.</div>
     <div class="foot"><span id="info"></span><button id="more" hidden>Load more</button></div>
@@ -812,6 +995,18 @@ dl{display:grid;grid-template-columns:120px 1fr;gap:7px 12px;margin:0}dt{color:v
       <div class="tab on" data-t="general">General</div><div class="tab" data-t="payload">Payload</div><div class="tab" data-t="response">Response</div>
     </div>
     <div class="pane" id="pane"></div>
+  </div>
+</div>
+<div class="ovl" id="logwin" hidden>
+  <div class="win" role="dialog" aria-modal="true" aria-label="Session logs">
+    <div class="whead">
+      <span class="wt">Session logs</span><span class="mono mut" id="lw_sid"></span>
+      <span class="grow"></span><span class="badge" id="lw_store" hidden></span>
+      <button id="lw_refresh">Refresh</button><button id="lw_copy">Copy</button>
+      <button class="x" id="lw_close" title="Close (Esc)">&#10005;</button>
+    </div>
+    <div class="wbody" id="lw_body"></div>
+    <div class="wfoot mut" id="lw_info"></div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
@@ -865,7 +1060,9 @@ function makeRow(it,isNew){
   if(it.session_id){se.title=it.session_id+"\n(click to filter)";se.onclick=e=>{e.stopPropagation();$("f_session").value=it.session_id;load({force:true});};}
   const d=el("button","\u{1F5D1}","x");d.title="Delete";d.onclick=e=>{e.stopPropagation();del(it.request_id);};
   const dt=el("td");dt.append(d);
-  tr.append(t,m,n,st,el("td",it.request_type),el("td",it.service),se,el("td",fmtDur(it.duration_ms),"mono"),el("td",fmtSize(it.size),"mono mut"),dt);
+  const lg=el("td");
+  if(it.session_id){const lb=el("button","Logs","logbtn");lb.title="View logs for this session";lb.onclick=e=>{e.stopPropagation();openLogs(it.session_id);};lg.append(lb);}
+  tr.append(t,m,n,st,el("td",it.request_type),el("td",it.service),se,el("td",fmtDur(it.duration_ms),"mono"),el("td",fmtSize(it.size),"mono mut"),lg,dt);
   tr.onclick=()=>select(it.request_id);
   return tr;
 }
@@ -931,7 +1128,9 @@ function render(){
   if(tab==="general"){
     const tools=el("div",null,"tools"),b=el("button","Copy as cURL");b.onclick=()=>copy(curl(current));
     const b2=el("button","Copy session ID");b2.onclick=()=>current.session_id&&copy(current.session_id);
-    tools.append(b,b2);pane.append(tools);
+    tools.append(b,b2);
+    if(current.session_id){const b3=el("button","Logs","logbtn");b3.onclick=()=>openLogs(current.session_id);tools.append(b3);}
+    pane.append(tools);
     const dl=el("dl");
     [["URL",current.url],["Method",current.method],["Status",current.status_code],["Service",current.service],["Request type",current.request_type],
      ["Session ID",current.session_id||"-"],["Date / time",fmt(current.ts_ms)],["UTC",current.timestamp],["Duration",fmtDur(current.duration_ms)],
@@ -973,6 +1172,7 @@ window.addEventListener("mousemove",e=>{if(drag)$("detail").style.width=Math.min
 window.addEventListener("mouseup",()=>{drag=false;document.body.classList.remove("dragging");});
 // keyboard: up/down to move through requests, Esc to close, Del to delete
 document.addEventListener("keydown",e=>{
+  if(!$("logwin").hidden){if(e.key==="Escape")closeLogs();return;}
   const tag=(e.target.tagName||"").toLowerCase();
   if(["input","select","textarea"].includes(tag)){if(e.key==="Escape")e.target.blur();return;}
   if(e.key==="ArrowDown"||e.key==="ArrowUp"){
@@ -983,6 +1183,53 @@ document.addEventListener("keydown",e=>{
   }else if(e.key==="Escape")closeDetail();
   else if(e.key==="Delete"&&selected)del(selected);
 });
+// ---- session-log popup ----
+let logSid=null,logTimer=null,logCount=-1,logLines=[];
+function closeLogs(){$("logwin").hidden=true;clearInterval(logTimer);logTimer=null;logSid=null;}
+function paintLogs(j,stick){
+  const body=$("lw_body");body.replaceChildren();logLines=j.logs||[];
+  logLines.forEach(l=>{
+    const lvl=String(l.level||"INFO").toUpperCase();
+    const row=el("div",null,"le"+(lvl==="ERROR"||lvl==="CRITICAL"?" lerr":""));
+    row.append(el("span",l.time||"","lt mono"),el("span",lvl,"lv lv-"+lvl));
+    const msg=el("div",null,"lm");msg.append(el("span",l.message||""));
+    if(typeof l.screenshot==="string"&&l.screenshot.startsWith("/screenshots/")){
+      msg.append(document.createElement("br"));
+      const a=el("a","View screenshot");a.href=l.screenshot;a.target="_blank";a.rel="noopener";msg.append(a);
+    }
+    row.append(msg);body.append(row);
+  });
+  if(stick)body.scrollTop=body.scrollHeight;
+  $("lw_info").textContent=`${logLines.length} log line${logLines.length===1?"":"s"}`+(j.service?` \u00b7 ${j.service}`:"");
+  const sb=$("lw_store");sb.hidden=!j.storage;sb.textContent=j.storage==="opensearch"?"OpenSearch":"SQLite";
+  sb.className="badge "+(j.storage==="opensearch"?"ok":"warn");
+}
+async function loadLogs(initial){
+  const sid=logSid;if(!sid)return;
+  try{
+    const j=await api("/devtools/api/sessions/"+encodeURIComponent(sid)+"/logs");
+    if(sid!==logSid)return;
+    const n=(j.logs||[]).length;
+    if(!initial&&n===logCount)return;                       // nothing new -> keep scroll position
+    const body=$("lw_body");
+    const stick=initial||body.scrollHeight-body.scrollTop-body.clientHeight<40;   // follow only if already at the bottom
+    logCount=n;paintLogs(j,stick);
+  }catch(e){
+    if(sid!==logSid||!initial)return;
+    logLines=[];logCount=-1;$("lw_body").replaceChildren(el("div",e.message,"empty"));$("lw_info").textContent="";$("lw_store").hidden=true;
+  }
+}
+function openLogs(sid){
+  logSid=sid;logCount=-1;logLines=[];
+  $("lw_sid").textContent=sid;$("lw_body").replaceChildren(el("div","Loading\u2026","empty"));$("lw_info").textContent="";$("lw_store").hidden=true;
+  $("logwin").hidden=false;
+  loadLogs(true);
+  clearInterval(logTimer);logTimer=setInterval(()=>{if(!document.hidden)loadLogs(false);},POLL_MS);   // live while open
+}
+$("lw_close").onclick=closeLogs;
+$("lw_refresh").onclick=()=>loadLogs(true);
+$("lw_copy").onclick=()=>copy(logLines.map(l=>`${l.time||""} [${String(l.level||"INFO").toUpperCase()}] ${l.message||""}`).join("\n"));
+$("logwin").addEventListener("mousedown",e=>{if(e.target===$("logwin"))closeLogs();});
 // auto-refresh is ALWAYS on (pauses only while the tab is hidden)
 setInterval(()=>{if(!document.hidden)load();},POLL_MS);
 document.addEventListener("visibilitychange",()=>{if(!document.hidden)load();});
@@ -1010,7 +1257,9 @@ class AutomationFramework:
                  devtools: bool = True,
                  devtools_token: str = None,
                  mask_sensitive: bool = True,
-                 mask_keys=_DEFAULT_MASK_KEYS):
+                 mask_keys=_DEFAULT_MASK_KEYS,
+                 session_log_sqlite_path: str = "logs/session_logs.db",
+                 opensearch_session_log_index: str = _SESSION_LOG_INDEX):
         """New (all optional):
         request_log          store every API call + payload + response (OpenSearch, else SQLite)
         opensearch_url       default env OPENSEARCH_URL or http://localhost:9200
@@ -1018,7 +1267,10 @@ class AutomationFramework:
                              OPENSEARCH_VERIFY_SSL (a local docker OpenSearch usually needs https + false)
         devtools             serve the network viewer at GET /devtools
         devtools_token       if set, /devtools needs ?token=... (header X-Devtools-Token on the API)
-        mask_sensitive/mask_keys   replace values of these JSON keys with *** before storing"""
+        mask_sensitive/mask_keys   replace values of these JSON keys with *** before storing
+        session_log_sqlite_path / opensearch_session_log_index
+                             SEPARATE SQLite file + OpenSearch index holding each session's log lines
+                             (one doc/row per session_id), shown by the "Logs" button in /devtools"""
         self.app = Flask(name)
         self.port = port
         CORS(
@@ -1068,6 +1320,7 @@ class AutomationFramework:
         self.mask_sensitive = mask_sensitive
         self.mask_keys = frozenset(str(k).lower() for k in mask_keys)
         self.request_store = None
+        self.session_log_store = None
         if request_log:
             verify = opensearch_verify_ssl
             if verify is None:
@@ -1076,6 +1329,14 @@ class AutomationFramework:
                 sqlite_path=request_log_sqlite_path,
                 opensearch_url=opensearch_url or os.environ.get("OPENSEARCH_URL", "http://localhost:9200"),
                 index=opensearch_index,
+                user=opensearch_user or os.environ.get("OPENSEARCH_USER"),
+                password=opensearch_password or os.environ.get("OPENSEARCH_PASSWORD"),
+                verify_ssl=verify,
+            )
+            self.session_log_store = SessionLogStore(
+                sqlite_path=session_log_sqlite_path,
+                opensearch_url=opensearch_url or os.environ.get("OPENSEARCH_URL", "http://localhost:9200"),
+                index=opensearch_session_log_index,
                 user=opensearch_user or os.environ.get("OPENSEARCH_USER"),
                 password=opensearch_password or os.environ.get("OPENSEARCH_PASSWORD"),
                 verify_ssl=verify,
@@ -1208,7 +1469,13 @@ class AutomationFramework:
             else:
                 session["status_hits"] = session.get("status_hits", 0) + 1
             service_name = session["service"]
+            created_at, logs_snapshot = session.get("created_at"), list(session["logs"])
         self._write_log_file(service_name, session_id, level, message, kind, screenshot_filename=screenshot_filename)
+        if self.session_log_store is not None:
+            try:
+                self.session_log_store.save(session_id, service_name, created_at, logs_snapshot)
+            except Exception:
+                traceback.print_exc()           # storing logs must never break the automation
         if self._comm_type(service_name) == "socket":
             self._emit_socket(session_id, "log", {**entry, "session_id": session_id,
                                                   "service": service_name, "index": log_index})
@@ -2214,6 +2481,23 @@ class AutomationFramework:
                 return jsonify({"error": "Request not found"}), 404
             doc["payload"] = _parse_json_text(doc.get("payload"))
             doc["response"] = _parse_json_text(doc.get("response"))
+            return jsonify(doc)
+
+        @self.app.route("/devtools/api/sessions/<session_id>/logs", methods=["GET"])
+        def devtools_session_logs(session_id):
+            denied = self._devtools_denied()
+            if denied:
+                return denied
+            doc = self.session_log_store.get(session_id) if self.session_log_store else None
+            if not doc:                                    # not flushed yet -> use the live in-memory session
+                with self._lock:
+                    session = self.sessions.get(session_id)
+                    if session:
+                        doc = {"session_id": session_id, "service": session.get("service"),
+                               "created_at": session.get("created_at"), "logs": list(session["logs"]),
+                               "count": len(session["logs"]), "storage": "memory"}
+            if not doc:
+                return jsonify({"error": "No logs stored for this session"}), 404
             return jsonify(doc)
 
         @self.app.route("/devtools/api/requests/<request_id>", methods=["DELETE"])
