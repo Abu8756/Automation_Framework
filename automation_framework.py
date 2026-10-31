@@ -22,7 +22,9 @@ import datetime
 
 import base64
 import hmac
+import collections
 import queue
+import secrets
 import sqlite3
 import ssl
 import time
@@ -357,6 +359,20 @@ _SESSION_LOG_INDEX = "automation_session_logs"
 _MAX_SESSION_LOG_CHARS = 2_000_000
 
 
+def _strip_url_credentials(url):
+    """http://user:pass@host:9200 -> http://host:9200 (never show credentials in an API response)."""
+    if not url:
+        return url
+    try:
+        u = urllib.parse.urlsplit(url)
+        host = u.hostname or ""
+        if u.port:
+            host += f":{u.port}"
+        return urllib.parse.urlunsplit((u.scheme, host, u.path, "", ""))
+    except Exception:
+        return "<hidden>"
+
+
 def _utc_now_parts():
     now = datetime.datetime.now(datetime.timezone.utc)
     return now.isoformat(timespec="milliseconds").replace("+00:00", "Z"), int(now.timestamp() * 1000)
@@ -688,6 +704,7 @@ class RequestLogStore:
         self._os_ok = False
         self._os_checked_at = 0.0
         self._queue = queue.Queue(maxsize=10000)
+        self._es_retry = collections.deque(maxlen=5000)   # docs saved in SQLite but not yet pushed to OpenSearch
         if self.os:
             print(f"[request-log] OpenSearch {'ready' if self.opensearch_available() else 'NOT reachable'} "
                   f"at {opensearch_url}; fallback SQLite: {sqlite_path}")
@@ -725,36 +742,51 @@ class RequestLogStore:
 
     def _worker(self):
         while True:
-            doc = self._queue.get()
             try:
-                if self.opensearch_available():
-                    try:
-                        self.os.insert(doc)
-                        continue
-                    except Exception:
-                        self._mark_os_down()
-                self.sqlite.insert(doc)
+                doc = self._queue.get(timeout=self._retry_seconds)
+            except queue.Empty:
+                doc = None                          # idle: just retry the unsent OpenSearch backlog
+            try:
+                if doc is not None:
+                    self.sqlite.insert(doc)         # 1) SQLite is the primary store: ALWAYS written
+                    self._es_retry.append(doc)      # 2) OpenSearch is the secondary copy (pushed below)
+                self._flush_to_opensearch()
             except Exception:
                 traceback.print_exc()
+
+    def _flush_to_opensearch(self):
+        """Push every doc not yet in OpenSearch. Failure never loses data (it is already in SQLite);
+        the docs stay queued and are retried as soon as OpenSearch is reachable again."""
+        while self._es_retry and self.opensearch_available():
+            doc = self._es_retry[0]
+            try:
+                self.os.insert(doc)
+            except Exception:
+                self._mark_os_down()
+                return
+            self._es_retry.popleft()
 
     # -- read / delete path --------------------------------------------
     def search(self, filters, limit=100, offset=0):
         want = min(limit + offset, 10000)
-        rows, total = [], 0
-        if self.opensearch_available():
+        r, total = self.sqlite.search(filters, want)             # SQLite = primary, always complete
+        rows = [dict(x, storage="sqlite") for x in r]
+        ids = {x.get("request_id") for x in rows}
+        if self.opensearch_available():                          # add rows that exist only in OpenSearch
             try:
                 r, t = self.os.search(filters, want)
-                rows += [dict(x, storage="opensearch") for x in r]
-                total += t
+                extra = [dict(x, storage="opensearch") for x in r if x.get("request_id") not in ids]
+                rows += extra
+                total = max(total + len(extra), t)
             except Exception:
                 self._mark_os_down()
-        r, t = self.sqlite.search(filters, want)
-        rows += [dict(x, storage="sqlite") for x in r]
-        total += t
         rows.sort(key=lambda d: d.get("ts_ms") or 0, reverse=True)
         return rows[offset:offset + limit], total
 
     def get(self, request_id):
+        doc = self.sqlite.get(request_id)
+        if doc:
+            return dict(doc, storage="sqlite")
         if self.opensearch_available():
             try:
                 doc = self.os.get(request_id)
@@ -762,14 +794,14 @@ class RequestLogStore:
                     return dict(doc, storage="opensearch")
             except Exception:
                 self._mark_os_down()
-        doc = self.sqlite.get(request_id)
-        return dict(doc, storage="sqlite") if doc else None
+        return None
 
     def delete_ids(self, ids):
         deleted = self.sqlite.delete_ids(ids)
+        self._es_retry = collections.deque((d for d in self._es_retry if d.get("request_id") not in set(ids)), maxlen=5000)
         if self.opensearch_available():
             try:
-                deleted += self.os.delete_ids(ids)
+                deleted = max(deleted, self.os.delete_ids(ids))      # same rows live in both stores
             except Exception:
                 self._mark_os_down()
         return deleted
@@ -778,14 +810,14 @@ class RequestLogStore:
         deleted = self.sqlite.delete_filtered(filters)
         if self.opensearch_available():
             try:
-                deleted += self.os.delete_filtered(filters)
+                deleted = max(deleted, self.os.delete_filtered(filters))
             except Exception:
                 self._mark_os_down()
         return deleted
 
     def status(self):
-        return {"opensearch": self.opensearch_available(), "opensearch_url": self.opensearch_url,
-                "index": self.index, "sqlite_path": self.sqlite_path}
+        return {"opensearch": self.opensearch_available(), "opensearch_url": _strip_url_credentials(self.opensearch_url),
+                "index": self.index, "sqlite_path": self.sqlite_path, "es_backlog": len(self._es_retry)}
 
 
 # ======================================================================
@@ -865,6 +897,7 @@ class SessionLogStore:
         self._pending = {}                      # session_id -> newest doc (older unsent ones are replaced)
         self._pending_lock = threading.Lock()
         self._wake = threading.Event()
+        self._es_retry = {}                     # session_id -> doc saved in SQLite, not yet pushed to OpenSearch
         if self.os:
             print(f"[session-log] OpenSearch index '{index}' {'ready' if self.opensearch_available() else 'NOT reachable'}; "
                   f"fallback SQLite: {sqlite_path}")
@@ -912,27 +945,37 @@ class SessionLogStore:
 
     def _worker(self):
         while True:
-            self._wake.wait()
+            self._wake.wait(timeout=self._retry_seconds)       # also wakes up to retry the OpenSearch backlog
             with self._pending_lock:
                 batch, self._pending = self._pending, {}
                 self._wake.clear()
             for doc in batch.values():
                 try:
-                    if self.opensearch_available():
-                        try:
-                            self.os.save(doc)
-                            continue
-                        except Exception:
-                            self._mark_os_down()
-                    self.sqlite.save(doc)
+                    self.sqlite.save(doc)                      # 1) SQLite primary: ALWAYS written
+                    self._es_retry[doc["session_id"]] = doc    # 2) OpenSearch secondary (newest copy wins)
                 except Exception:
                     traceback.print_exc()
+            try:
+                for sid in list(self._es_retry):
+                    if not self.opensearch_available():
+                        break
+                    try:
+                        self.os.save(self._es_retry[sid])
+                    except Exception:
+                        self._mark_os_down()
+                        break
+                    self._es_retry.pop(sid, None)
+            except Exception:
+                traceback.print_exc()
 
     # -- read path ------------------------------------------------------
     def get(self, session_id):
         """Newest copy of this session's logs (OpenSearch and SQLite are both
         checked, so lines written to SQLite while OpenSearch was down are not lost)."""
         found = []
+        doc = self.sqlite.get(session_id)                      # SQLite first = wins ties (primary store)
+        if doc:
+            found.append(dict(doc, storage="sqlite"))
         if self.opensearch_available():
             try:
                 doc = self.os.get(session_id)
@@ -940,9 +983,6 @@ class SessionLogStore:
                     found.append(dict(doc, storage="opensearch"))
             except Exception:
                 self._mark_os_down()
-        doc = self.sqlite.get(session_id)
-        if doc:
-            found.append(dict(doc, storage="sqlite"))
         if not found:
             return None
         best = max(found, key=lambda d: (d.get("count") or 0, d.get("updated_ms") or 0))
@@ -1103,14 +1143,18 @@ dl{display:grid;grid-template-columns:120px 1fr;gap:7px 12px;margin:0}dt{color:v
 </div>
 <div class="toast" id="toast"></div>
 <script>
-const TOKEN=new URLSearchParams(location.search).get("token")||"";
+let TOKEN=sessionStorage.getItem("dt_token")||"";
+(function(){const q=new URLSearchParams(location.search).get("token");   // legacy ?token= : keep it, then hide it from the URL
+  if(q){TOKEN=q;sessionStorage.setItem("dt_token",q);history.replaceState(null,"",location.pathname);}})();
 const $=id=>document.getElementById(id);
 const PAGE=100,POLL_MS=2000;
 let offset=0,total=0,selected=null,current=null,tab="general",busy=false,first=true,seen=new Set();
 
 async function api(path,opts={}){
-  opts.headers=Object.assign({"Content-Type":"application/json"},opts.headers||{},TOKEN?{"X-Devtools-Token":TOKEN}:{});
+  if(!TOKEN){TOKEN=prompt("DevTools access token")||"";if(TOKEN)sessionStorage.setItem("dt_token",TOKEN);}
+  opts.headers=Object.assign({"Content-Type":"application/json"},opts.headers||{},{"X-Devtools-Token":TOKEN});
   const r=await fetch(path,opts),j=await r.json().catch(()=>({}));
+  if(r.status===401){TOKEN="";sessionStorage.removeItem("dt_token");}
   if(!r.ok)throw new Error(j.error||("HTTP "+r.status));
   return j;
 }
@@ -1363,7 +1407,9 @@ class AutomationFramework:
         opensearch_user/_password/_verify_ssl   default env OPENSEARCH_USER / OPENSEARCH_PASSWORD /
                              OPENSEARCH_VERIFY_SSL (a local docker OpenSearch usually needs https + false)
         devtools             serve the network viewer at GET /devtools
-        devtools_token       if set, /devtools needs ?token=... (header X-Devtools-Token on the API)
+        devtools_token       access token for DevTools (always required; sent as header X-Devtools-Token,
+                             the page asks for it). Default: env DEVTOOLS_TOKEN, else random + printed.
+                             devtools=False -> /devtools and /devtools/api/* do not exist (plain 404)
         mask_sensitive/mask_keys   STORED copies only (OpenSearch, SQLite, session log file): values of sensitive
                              keys (passwords, OTP, tokens, Aadhaar/PAN/UAN, mobile, e-mail, DOB, address, bank
                              account, username ...) become ***, and Aadhaar/PAN/mobile/e-mail/password=/otp:
@@ -1423,7 +1469,16 @@ class AutomationFramework:
         os.makedirs(self.screenshot_dir, exist_ok=True)
 
         # --- API request log + DevTools view ---------------------------
-        self.devtools_token = devtools_token
+        # DevTools is private by default: a token is ALWAYS required. Pass devtools_token=..., or set the
+        # DEVTOOLS_TOKEN env var; if neither is given a random one is generated and printed once at start-up.
+        self.devtools_enabled = bool(devtools)
+        self._devtools_fails = {}                       # client ip -> [failed-attempt timestamps]
+        self.devtools_token = None
+        if devtools:
+            self.devtools_token = devtools_token or os.environ.get("DEVTOOLS_TOKEN")
+            if not self.devtools_token:
+                self.devtools_token = secrets.token_urlsafe(24)
+                print(f"[devtools] no devtools_token / DEVTOOLS_TOKEN set -> generated access token: {self.devtools_token}")
         self.mask_sensitive = mask_sensitive
         self.mask_keys = frozenset(str(k).lower() for k in mask_keys)
         self.request_store = None
@@ -2538,11 +2593,24 @@ class AutomationFramework:
     # DevTools network view:  GET /devtools   +   /devtools/api/...
     # ------------------------------------------------------------------
     def _devtools_denied(self):
-        if not self.devtools_token:
+        if not self.devtools_enabled or not self.devtools_token:
+            return jsonify({"error": "Not found"}), 404
+        ip = (request.remote_addr or "?")
+        now = time.time()
+        fails = [t for t in self._devtools_fails.get(ip, []) if now - t < 300]
+        if len(fails) >= 10:                              # brute-force guard: 10 bad tries / 5 min / IP
+            return jsonify({"error": "Too many failed attempts, try again later"}), 429
+        supplied = request.headers.get("X-Devtools-Token") or ""
+        auth = request.headers.get("Authorization") or ""
+        if not supplied and auth.lower().startswith("bearer "):
+            supplied = auth[7:].strip()
+        if supplied and hmac.compare_digest(supplied.encode("utf-8"), self.devtools_token.encode("utf-8")):
+            self._devtools_fails.pop(ip, None)
             return None
-        supplied = request.headers.get("X-Devtools-Token") or request.args.get("token") or ""
-        if hmac.compare_digest(supplied.encode("utf-8"), self.devtools_token.encode("utf-8")):
-            return None
+        fails.append(now)
+        self._devtools_fails[ip] = fails
+        if len(self._devtools_fails) > 5000:              # keep the table small
+            self._devtools_fails = {k: v for k, v in self._devtools_fails.items() if v and now - v[-1] < 300}
         return jsonify({"error": "Unauthorized"}), 401
 
     def _register_devtools_routes(self):
@@ -2561,11 +2629,19 @@ class AutomationFramework:
                 "date_to": _to_ms(src.get("date_to"), end_of_day=True),
             }
 
+        @self.app.after_request
+        def _devtools_security_headers(response):
+            if request.path.startswith("/devtools"):
+                response.headers["Cache-Control"] = "no-store"
+                response.headers["Referrer-Policy"] = "no-referrer"
+                response.headers["X-Content-Type-Options"] = "nosniff"
+                response.headers["X-Frame-Options"] = "DENY"
+            return response
+
         @self.app.route("/devtools", methods=["GET"])
         def devtools_page():
-            denied = self._devtools_denied()
-            if denied:
-                return denied
+            # The page itself holds no data (a static shell); every /devtools/api/* call needs the token,
+            # which the page asks for and keeps only in sessionStorage -- never in the URL.
             return Response(_DEVTOOLS_HTML, mimetype="text/html")
 
         @self.app.route("/devtools/api/meta", methods=["GET"])
