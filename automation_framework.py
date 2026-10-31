@@ -327,7 +327,7 @@ def action(name: str = None, methods=None, schema: dict = None, creates_session:
 _REQUEST_LOG_INDEX = "automation_api_requests"
 _MAX_STORED_CHARS = 200_000
 _DEFAULT_MASK_KEYS = ("password", "passwd", "pwd", "otp", "token", "access_token",
-                      "refresh_token", "secret", "authorization")
+                      "refresh_token", "secret", "authorization", "username", "user_name")
 _SERVICE_ROUTE_TYPES = ("start", "status", "otp", "delete", "logs")
 _REQUEST_TYPES = _SERVICE_ROUTE_TYPES + ("action", "other")
 _FILTER_FIELDS = ("session_id", "service", "request_type", "method")
@@ -336,6 +336,23 @@ _LIST_COLUMNS = ("request_id", "timestamp", "ts_ms", "session_id", "service", "r
 _ALLOWED_ORIGIN = "https://indiafilings-tau.vercel.app"
 # Per-session log trail (the add_log() lines) -- its OWN OpenSearch index and its OWN
 # SQLite file, one document/row per session_id (session_id is the unique id in both).
+# Request headers copied into every stored API-request document (OpenSearch + SQLite).
+# A fixed allow-list on purpose: Authorization / Cookie are never stored.
+_CAPTURED_REQUEST_HEADERS = (
+    "User-Agent",          # browser, OS, device information
+    "Sec-CH-UA",           # browser brand and version
+    "Sec-CH-UA-Platform",  # operating system
+    "Sec-CH-UA-Mobile",    # mobile / non-mobile indicator
+    "Accept-Language",     # preferred language
+    "Sec-Fetch-Site",      # request origin relationship
+    "Sec-Fetch-Mode",      # browser request mode
+    "Origin",              # requesting website origin
+    "Referer",             # previous page URL, if provided
+    "content-type",
+    "content-length",
+    "origin"
+)
+_LEGACY_CORS = object()    # "allowed_origins" not passed -> keep the original hard-coded CORS
 _SESSION_LOG_INDEX = "automation_session_logs"
 _MAX_SESSION_LOG_CHARS = 2_000_000
 
@@ -365,12 +382,84 @@ def _to_ms(value, end_of_day: bool = False):
     return int(dt.timestamp() * 1000)
 
 
+# ----------------------------------------------------------------------
+# Sensitive-data protection for everything that is STORED (OpenSearch, SQLite
+# and the session log file). The live API responses and the running automation
+# are never changed -- only the stored copies are sanitized.
+#
+#   1) by KEY name  -> the whole value becomes "***"
+#        exact keys (mask_keys), whole words inside a key (pan_number, director_dob,
+#        mobileNo ...) and a few unambiguous fragments (aadhaar, mobile, email ...)
+#   2) by VALUE shape -> inside any stored text (payload strings, response strings,
+#        log messages) an Aadhaar/UAN (12 digits), PAN, mobile number, e-mail address,
+#        "password=...", "otp: 123456" is replaced with ***
+# ----------------------------------------------------------------------
+_MASK = "***"
+_SENSITIVE_WORDS = frozenset((
+    "otp", "pwd", "pan", "uan", "dob", "cvv", "pass", "phone", "mobile", "email", "aadhaar", "aadhar",
+    "password", "passwd", "secret", "token", "cookie", "captcha", "authorization", "idtoken",
+))
+_SENSITIVE_FRAGMENTS = ("password", "passwd", "aadhaar", "aadhar", "mobile", "email", "phone", "secret",
+                        "token", "authorization", "cookie", "captcha", "address", "birth",
+                        "account_number", "accountnumber", "card_number", "cardnumber")
+_NOT_SENSITIVE_KEYS = frozenset(("otp_type",))      # describes the OTP kind, holds no secret
+
+_SCRUB_PATTERNS = (
+    (re.compile(r"(?i)\b(password|passwd|pwd|secret|token|authorization)\b(\s*[:=]\s*)(\"?)[^\s\",;&]+"), r"\1\2\3" + _MASK),
+    (re.compile(r"(?i)\b(otp)\b(\s*(?:is|[:=\-])?\s*)\d{4,8}\b"), r"\1\2" + _MASK),
+    (re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"), _MASK),            # e-mail
+    (re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b"), _MASK),                                    # PAN
+    (re.compile(r"(?<![\w-])\d{4}[ -]\d{4}[ -]\d{4}(?![\w-])"), _MASK),                                  # Aadhaar 1234 5678 9012
+    (re.compile(r"(?<![\w-])\d{12}(?![\w-])"), _MASK),                                      # Aadhaar / UAN (not a UUID tail)
+    (re.compile(r"(?<![\w-])(?:\+?91[\s-]?)?[6-9]\d{9}(?![\w-])"), _MASK),                 # mobile
+)
+
+
+def _is_sensitive_key(key, keys) -> bool:
+    k = str(key).lower()
+    if k in _NOT_SENSITIVE_KEYS:
+        return False
+    if k in keys:
+        return True
+    if _SENSITIVE_WORDS.intersection(re.split(r"[^a-z0-9]+", k)):
+        return True
+    return any(fragment in k for fragment in _SENSITIVE_FRAGMENTS)
+
+
+def _scrub_text(text):
+    """Blank out Aadhaar/UAN, PAN, mobile, e-mail, password=..., otp: ... inside free text."""
+    if not isinstance(text, str) or not text:
+        return text
+    for pattern, replacement in _SCRUB_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def _mask_sensitive(value, keys):
     if isinstance(value, dict):
-        return {k: ("***" if str(k).lower() in keys else _mask_sensitive(v, keys)) for k, v in value.items()}
+        return {k: (_MASK if (_is_sensitive_key(k, keys) and v is not None and not isinstance(v, bool))
+                    else _mask_sensitive(v, keys))
+                for k, v in value.items()}
     if isinstance(value, list):
         return [_mask_sensitive(v, keys) for v in value]
+    if isinstance(value, str):
+        return _scrub_text(value)
     return value
+
+
+def _mask_url(url, keys):
+    """Mask sensitive query-string values (?token=..., ?mobile=...) and scrub the rest."""
+    if not url:
+        return url
+    try:
+        parts = urllib.parse.urlsplit(url)
+        if parts.query:
+            pairs = [(k, _MASK if _is_sensitive_key(k, keys) else _scrub_text(v))
+                     for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)]
+            parts = parts._replace(query=urllib.parse.urlencode(pairs, safe="*"))
+        return _scrub_text(urllib.parse.urlunsplit(parts))
+    except Exception:
+        return _scrub_text(url)
 
 
 def _to_json_text(value) -> str:
@@ -454,6 +543,7 @@ class _OpenSearchStore:
                     # unindexed JSON text: no mapping explosion, still in _source.
                     "payload":      {"type": "keyword", "index": False, "doc_values": False},
                     "response":     {"type": "keyword", "index": False, "doc_values": False},
+                    "headers":      {"type": "keyword", "index": False, "doc_values": False},
                 }},
             })
 
@@ -480,7 +570,7 @@ class _OpenSearchStore:
             "sort": [{"ts_ms": "desc"}],
             "from": offset, "size": size,
             "track_total_hits": True,
-            "_source": {"excludes": ["payload", "response"]},
+            "_source": {"excludes": ["payload", "response", "headers"]},
         }, timeout=10)
         hits = res.get("hits", {})
         total = hits.get("total", {})
@@ -520,6 +610,8 @@ class _SQLiteStore:
             session_id TEXT, service TEXT, request_type TEXT, method TEXT, path TEXT, url TEXT,
             status_code INTEGER, duration_ms REAL, client_ip TEXT, size INTEGER,
             payload TEXT, response TEXT)""")
+        if "headers" not in [r["name"] for r in self._exec("PRAGMA table_info(api_requests)", fetch=True)]:
+            self._exec("ALTER TABLE api_requests ADD COLUMN headers TEXT")      # DB created before headers were stored
         self._exec("CREATE INDEX IF NOT EXISTS ix_api_requests_ts ON api_requests(ts_ms DESC)")
         self._exec("CREATE INDEX IF NOT EXISTS ix_api_requests_session ON api_requests(session_id)")
         self._exec("CREATE INDEX IF NOT EXISTS ix_api_requests_service ON api_requests(service)")
@@ -553,7 +645,7 @@ class _SQLiteStore:
         return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
     def insert(self, doc):
-        cols = list(_LIST_COLUMNS) + ["payload", "response"]
+        cols = list(_LIST_COLUMNS) + ["payload", "response", "headers"]
         self._exec(f"INSERT OR REPLACE INTO api_requests ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                    [doc.get(c) for c in cols])
 
@@ -992,7 +1084,7 @@ dl{display:grid;grid-template-columns:120px 1fr;gap:7px 12px;margin:0}dt{color:v
       <button class="x" id="d_del" title="Delete this request (Del)">&#128465;</button>
       <button class="x" id="d_close" title="Close (Esc)">&#10005;</button></div>
     <div class="tabs">
-      <div class="tab on" data-t="general">General</div><div class="tab" data-t="payload">Payload</div><div class="tab" data-t="response">Response</div>
+      <div class="tab on" data-t="general">General</div><div class="tab" data-t="headers">Headers</div><div class="tab" data-t="payload">Payload</div><div class="tab" data-t="response">Response</div>
     </div>
     <div class="pane" id="pane"></div>
   </div>
@@ -1137,6 +1229,10 @@ function render(){
      ["Size",fmtSize(current.size)],["Client IP",current.client_ip||"-"],["Stored in",current.storage],["Request ID",current.request_id]]
       .forEach(([k,v])=>dl.append(el("dt",k),el("dd",v)));
     pane.append(dl);
+  }else if(tab==="headers"){
+    const h=current.headers||{},keys=Object.keys(h);
+    if(!keys.length)pane.append(el("div","(no request headers stored)","mut"));
+    else{const dl=el("dl");keys.forEach(k=>dl.append(el("dt",k),el("dd",h[k])));pane.append(dl);}
   }else{
     const text=pretty(current[tab]);
     const tools=el("div",null,"tools"),b=el("button","Copy");b.onclick=()=>copy(text);tools.append(b);pane.append(tools);
@@ -1259,6 +1355,7 @@ class AutomationFramework:
                  mask_sensitive: bool = True,
                  mask_keys=_DEFAULT_MASK_KEYS,
                  session_log_sqlite_path: str = "logs/session_logs.db",
+                 allowed_origins=_LEGACY_CORS,
                  opensearch_session_log_index: str = _SESSION_LOG_INDEX):
         """New (all optional):
         request_log          store every API call + payload + response (OpenSearch, else SQLite)
@@ -1267,22 +1364,32 @@ class AutomationFramework:
                              OPENSEARCH_VERIFY_SSL (a local docker OpenSearch usually needs https + false)
         devtools             serve the network viewer at GET /devtools
         devtools_token       if set, /devtools needs ?token=... (header X-Devtools-Token on the API)
-        mask_sensitive/mask_keys   replace values of these JSON keys with *** before storing
+        mask_sensitive/mask_keys   STORED copies only (OpenSearch, SQLite, session log file): values of sensitive
+                             keys (passwords, OTP, tokens, Aadhaar/PAN/UAN, mobile, e-mail, DOB, address, bank
+                             account, username ...) become ***, and Aadhaar/PAN/mobile/e-mail/password=/otp:
+                             patterns inside any text are scrubbed. mask_keys adds exact key names of your own.
+        allowed_origins      pass the application's ALLOWED_ORIGINS list (or None/[] for "*"): the application
+                             then owns the CORS response headers (its own after_request), flask_cors is NOT
+                             installed, and Socket.IO uses the same list. Not passed -> original behaviour.
         session_log_sqlite_path / opensearch_session_log_index
                              SEPARATE SQLite file + OpenSearch index holding each session's log lines
                              (one doc/row per session_id), shown by the "Logs" button in /devtools"""
         self.app = Flask(name)
         self.port = port
-        CORS(
-                self.app,
-                origins=_ALLOWED_ORIGIN
-            )
+        if allowed_origins is _LEGACY_CORS:
+            CORS(
+                    self.app,
+                    origins=_ALLOWED_ORIGIN
+                )
+            socket_origins = _ALLOWED_ORIGIN
+        else:
+            socket_origins = list(allowed_origins) if allowed_origins else "*"
 
         # Live status push for services declared with status_comm_type="Socket".
         # async_mode="threading" works with Flask's dev server and with Waitress
         # (Waitress cannot upgrade to WebSocket, so Socket.IO falls back to
         # long-polling there -- see run()).
-        self.socketio = (SocketIO(self.app, cors_allowed_origins=_ALLOWED_ORIGIN, async_mode="threading")
+        self.socketio = (SocketIO(self.app, cors_allowed_origins=socket_origins, async_mode="threading")
                          if SocketIO is not None else None)
 
         self.sessions = {}          # session_id -> session dict
@@ -1415,7 +1522,7 @@ class AutomationFramework:
             "session_id": session_id,
             "level": level,
             "kind": kind,
-            "message": message,
+            "message": _scrub_text(message) if self.mask_sensitive else message,
         }
         if screenshot_filename:
             entry["screenshot"] = f"/screenshots/{screenshot_filename}"
@@ -1469,7 +1576,13 @@ class AutomationFramework:
             else:
                 session["status_hits"] = session.get("status_hits", 0) + 1
             service_name = session["service"]
-            created_at, logs_snapshot = session.get("created_at"), list(session["logs"])
+            if self.mask_sensitive:
+                # stored copy only: the in-memory entry (served live by /status view=logs) stays as written
+                session.setdefault("_stored_logs", []).append(dict(entry, message=_scrub_text(entry["message"])))
+                stored_logs = list(session["_stored_logs"])
+            else:
+                stored_logs = list(session["logs"])
+            created_at, logs_snapshot = session.get("created_at"), stored_logs
         self._write_log_file(service_name, session_id, level, message, kind, screenshot_filename=screenshot_filename)
         if self.session_log_store is not None:
             try:
@@ -2395,6 +2508,12 @@ class AutomationFramework:
             resp_value = _mask_sensitive(resp_value, self.mask_keys)
 
         response_text = _to_json_text(resp_value)
+        headers = {name: request.headers.get(name) for name in _CAPTURED_REQUEST_HEADERS if request.headers.get(name)}
+        stored_url = request.url
+        if self.mask_sensitive:
+            stored_url = _mask_url(stored_url, self.mask_keys)
+            headers = {k: (_mask_url(v, self.mask_keys) if k in ("Referer", "Origin") else _scrub_text(v))
+                       for k, v in headers.items()}
         ts_iso, ts_ms = g._rl_ts
         return {
             "request_id": uuid.uuid4().hex,
@@ -2405,13 +2524,14 @@ class AutomationFramework:
             "request_type": request_type,
             "method": request.method,
             "path": request.path,
-            "url": request.url,
+            "url": stored_url,
             "status_code": response.status_code,
             "duration_ms": round((time.perf_counter() - g._rl_started) * 1000, 2),
             "client_ip": (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[0].strip(),
             "size": len(response_text),
             "payload": _to_json_text(payload),
             "response": response_text,
+            "headers": _to_json_text(headers),
         }
 
     # ------------------------------------------------------------------
@@ -2481,6 +2601,7 @@ class AutomationFramework:
                 return jsonify({"error": "Request not found"}), 404
             doc["payload"] = _parse_json_text(doc.get("payload"))
             doc["response"] = _parse_json_text(doc.get("response"))
+            doc["headers"] = _parse_json_text(doc.get("headers")) or {}
             return jsonify(doc)
 
         @self.app.route("/devtools/api/sessions/<session_id>/logs", methods=["GET"])
