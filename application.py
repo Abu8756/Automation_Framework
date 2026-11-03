@@ -35,7 +35,7 @@ CONFIG = {
     "DEBUG": os.environ.get("APP_DEBUG", "false").strip().lower() in ("1", "true", "yes", "on"),
     # "flask"    -> Flask's built-in dev server (app.run), fine for local dev
     # "waitress" -> production-grade WSGI server, recommended for real deployments
-    "SERVER": os.environ.get("APP_SERVER", "flask").strip().lower(),
+    "SERVER": os.environ.get("APP_SERVER", "waitress").strip().lower(),
     "LOG_PATH": os.environ.get("APP_LOG_PATH", "logs/sessions.log"),
     "THREADS": int(os.environ.get("APP_THREADS", "8")),  # waitress-only
 }

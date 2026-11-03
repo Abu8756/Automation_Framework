@@ -285,7 +285,6 @@ class UdyamRegistration:
         return current_value
 
     def udyam_reg_v2(self):
-    
         try:
             self.service.add_log("Starting Udyam Registration")
             self.service.set_progress(2)
@@ -365,23 +364,67 @@ class UdyamRegistration:
             otp_btn = self.wait.until(EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_btnValidateAadhaar")))
             self.driver.execute_script("arguments[0].click();", otp_btn)
 
-            # Check Aadhaar validation error
-            try:
-                # error_element = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_lblmsg")))
+            # # Check Aadhaar validation error
+            # try:
+            #     # error_element = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_lblmsg")))
 
-                error_element = WebDriverWait(self.driver, 20).until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_lblmsg")))
-                error_message = error_element.text.strip()
+            #     error_element = WebDriverWait(self.driver, 20).until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_lblmsg")))
+            #     error_message = error_element.text.strip()
 
-                if (
-                    "There is error in Aadhaar Validation/Authentication" in error_message
-                    or "Your Aadhaar has not been validated" in error_message
-                ):
-                    raise Exception(
-                        f"Aadhaar validation failed: {error_message}"
-                    )
+            #     if (
+            #         "There is error in Aadhaar Validation/Authentication" in error_message
+            #         or "Your Aadhaar has not been validated" in error_message
+            #     ):
+            #         raise Exception(f"Aadhaar validation failed: {error_message}")
+            #     else :
+            #         otp_response = WebDriverWait(self.driver, 20).until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_lblOtpRes1"))).text.strip()
+            # except TimeoutException:
+            #     pass  # Error message did not appear within the wait period
+            # Click Aadhaar OTP button
 
-            except TimeoutException:
-                pass  # Error message did not appear within the wait period
+            # Click Aadhaar OTP button
+            # self.driver.execute_script("arguments[0].click();", otp_btn)
+
+            time.sleep(2)
+            self.wait_loader_loop()
+
+            # Check both response elements independently
+            otp_elements = self.driver.find_elements(By.ID, "ctl00_ContentPlaceHolder1_lblOtpRes1")
+
+            error_elements = self.driver.find_elements(By.ID, "ctl00_ContentPlaceHolder1_lblmsg")
+
+            otp_response = otp_elements[0].text.strip() if otp_elements else ""
+            error_response = error_elements[0].text.strip() if error_elements else ""
+
+            if "OTP has been sent to" in otp_response:
+
+                mobile_number = otp_response.split("to")[-1].strip()
+
+                log_message = f"Aadhaar OTP has been sent successfully to {mobile_number}."
+                print(log_message)
+                self.service.add_log(log_message)
+
+            elif (
+                "There is error in Aadhaar Validation" in error_response
+                or "Your Aadhaar has not been validated" in error_response
+                or "Aadhaar" in error_response
+            ):
+                # self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});",error_elements[0])
+                declaration = self.driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_chkDecarationA")
+
+                self.driver.execute_script("arguments[0].scrollIntoView({behavior:'smooth', block:'center', inline:'center'});",declaration)
+                time.sleep(1)
+                raise Exception(
+                    "Aadhaar validation/authentication failed. "
+                    "Please verify your Aadhaar details from your side."
+                )
+
+            else:
+                raise Exception(
+                    f"Unexpected Aadhaar response. "
+                    f"OTP Response: {otp_response or 'Not found'}, "
+                    f"Error Response: {error_response or 'Not found'}"
+                )
 
 
             self.service.add_log("OTP sent successfully")
@@ -424,6 +467,9 @@ class UdyamRegistration:
             except:
                 otp_error=None
             if otp_error!=None and "Incorrect OTP" in otp_error.text:
+                declaration = self.driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_chkDecarationA")
+                self.driver.execute_script("arguments[0].scrollIntoView({behavior:'smooth', block:'center', inline:'center'});",declaration)
+                time.sleep(2)
                 self.service.add_log("Incorrect OTP So after 5 Minutes Retry it. Automation Closed")
                 raise "Incorrect OTP So after 5 Minutes Retry it. Automation Closed"
 
@@ -466,8 +512,9 @@ class UdyamRegistration:
             time.sleep(1)
         
             # 🔹 Fill DOB / DOI (letter by letter format DD/MM/YYYY)
-            date_value = self.data["date_of_birth"] if str(self.data.get("org_value")) in ("1", "2") else self.data["incorporation_date"]
             
+            date_value = self.data["date_of_birth"] if str(self.data.get("organisation_type")) in ("1", "2") else self.data["incorporation_date"]
+
             dob_input = self.wait.until(EC.visibility_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtdob")))
             dob_input.clear()
             for ch in date_value:
@@ -492,29 +539,42 @@ class UdyamRegistration:
             self.service.set_progress(28)
             time.sleep(2)
             self.wait_loader_loop()
+
             try:
-                error = self.driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblPanError")
+                error = self.driver.find_element(
+                    By.ID, "ctl00_ContentPlaceHolder1_lblPanError"
+                )
+                self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", error)
+                time.sleep(2)
                 message = error.text.strip()
 
-                if "You can not verify PAN more than 5 times in a day." in error.text:
-                    raise f"Already Five times used in the portal this pan number {pan_no},So You can not verify PAN more than 5 times in a day."
-                    # return {
-                    #     "status": False,
-                    #     "message": error.text.strip()
-                    # }
+                if "You can not verify PAN more than 5 times in a day." in message:
+                    raise Exception(
+                        f"PAN verification limit exceeded for PAN {pan_no}. "
+                        "You cannot verify PAN more than 5 times in a day."
+                    )
 
-                if "Your PAN has been successfully verified" in message:
-                    pass  # Continue
+                elif "Details mismatched." in message:
+                    raise Exception(
+                        "PAN details mismatched. Please verify the PAN number "
+                        "and applicant details"
+                    )
 
                 elif "Udyam Registration has already done" in message:
-                    raise "This pan Number already verified in the portal, So apply the udyam cancellation then try it"
-                    # return {
-                    #     "status": False,
-                    #     "message": message
-                    # }
+                    raise Exception(
+                        "Udyam Registration has already been completed through "
+                        "this PAN. Please check the existing registration."
+                    )
+
+                elif "Your PAN has been successfully verified" in message:
+                    print("PAN verified successfully.")
+                    self.service.add_log("PAN verified successfully")
+
+                else:
+                    raise Exception(f"Unexpected PAN validation response: {message}")
 
             except NoSuchElementException:
-                pass  # Element not found, continue if appropriate
+                raise Exception("PAN validation response not found. Please check the portal.")
 
             time.sleep(2)
     
@@ -1363,6 +1423,7 @@ class UdyamRegistration:
                     print("Second Alert:", alert.text)
                     # match = re.search(r"UDYAM-[A-Z]{2}-\d+", alert.text)
                     match = re.search(r"UDYAM-[A-Z]{2}-\d{7}", alert.text)
+                    print(match)
                     if match:
                         udyam_number = match.group()
                         print("Registration Number:", udyam_number)
@@ -1415,8 +1476,7 @@ class UdyamRegistration:
                 raise Exception("Unknown result after final submit. Check the page.")
 
             # Read the Udyam number from the success page
-            WebDriverWait(self.driver, 20).until(
-                lambda d: d.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblmsg").text.strip() != "")
+            WebDriverWait(self.driver, 20).until(lambda d: d.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblmsg").text.strip() != "")
             udyam_no_page = self.driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_lblmsg").text
             # match = re.search(r"UDYAM-[A-Z]{2}-\d+", udyam_no_page)
             # if match:
