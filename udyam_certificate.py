@@ -45,6 +45,39 @@ OTP_TIMEOUT_SECONDS = 550.0
 print("Initializing EasyOCR reader...")
 reader = easyocr.Reader(["en"], gpu=False)
 
+ANNEXURE_STYLE = (
+    "text-align: center; padding-left: 0%; padding-right: 25%; "
+    "page-break-before: always"
+)
+
+# A4 in inches, and the printable width in CSS px (96 dpi)
+PAPER_W_IN, PAPER_H_IN, MARGIN_IN = 8.27, 11.69, 0.3
+PRINTABLE_PX = int((PAPER_W_IN - 2 * MARGIN_IN) * 96)  # ~736
+
+PRINT_FIX_CSS = """
+body { margin: 0 !important; }
+#divAnnx div { overflow: visible !important; }
+#divAnnx, #divAnnx table { max-width: 100% !important; }
+tr, img { page-break-inside: avoid; }
+"""
+
+# Same thing the site's printAllDiv('divallprint') does, minus window.print()
+JS_PREPARE_PRINT_ALL = """
+const annx = document.getElementById('divAnnx');
+const all = document.getElementById('divallprint');
+if (!annx || !all) { return false; }
+annx.setAttribute('style', arguments[0]);
+document.body.innerHTML = all.innerHTML;
+const st = document.createElement('style');
+st.textContent = arguments[1];
+document.head.appendChild(st);
+return true;
+"""
+
+JS_CONTENT_WIDTH = """
+return Math.max(document.documentElement.scrollWidth, document.body.scrollWidth);
+"""
+
 JS_FETCH_IMAGE_AS_BASE64 = """
 const callback = arguments[arguments.length - 1];
 const url = arguments[0];
@@ -217,6 +250,34 @@ class UdyamCertificate:
         self.service.add_log("Logged in to Udyam dashboard")
 
     # ------------------------------------------------------------------
+    # def _download_pdf(self):
+    #     driver = self.driver
+
+    #     if DASHBOARD_URL not in driver.current_url:
+    #         driver.get(DASHBOARD_URL)
+    #         time.sleep(2)
+    #     _dump_html(self.session_id, "4_dashboard_page", driver.page_source)
+
+    #     self.service.add_log("Requesting certificate print view")
+    #     self.service.set_progress(75)
+    #     before_handles = driver.window_handles
+    #     _js_click(driver, "ctl00_ContentPlaceHolder1_btnPrintC")
+    #     time.sleep(3)
+
+    #     after_handles = driver.window_handles
+    #     if len(after_handles) > len(before_handles):
+    #         driver.switch_to.window(after_handles[-1])
+    #         time.sleep(2)
+
+    #     # The one step that isn't page-JS: window.print() only opens the OS
+    #     # print dialog and can't return bytes, so Page.printToPDF via CDP
+    #     # (what Selenium's print_page() wraps) is what actually produces
+    #     # the PDF.
+    #     self.service.add_log("Rendering certificate to PDF")
+    #     self.service.set_progress(90)
+    #     pdf_result = driver.execute_cdp_cmd("Page.printToPDF", {"printBackground": True})
+    #     return pdf_result["data"]
+
     def _download_pdf(self):
         driver = self.driver
 
@@ -236,11 +297,47 @@ class UdyamCertificate:
             driver.switch_to.window(after_handles[-1])
             time.sleep(2)
 
-        # The one step that isn't page-JS: window.print() only opens the OS
-        # print dialog and can't return bytes, so Page.printToPDF via CDP
-        # (what Selenium's print_page() wraps) is what actually produces
-        # the PDF.
+        # Show the annexure + restyle it + swap body to divallprint,
+        # exactly like the site's "Print with Annexure" button.
+        prepared = False
+        for _ in range(10):
+            if driver.execute_script(JS_PREPARE_PRINT_ALL, ANNEXURE_STYLE, PRINT_FIX_CSS):
+                prepared = True
+                self.service.add_log("Annexure shown and restyled")
+                break
+            time.sleep(0.5)
+        if not prepared:
+            self.service.add_log(
+                "#divAnnx / #divallprint not found, printing page as-is", level="WARNING"
+            )
+        _dump_html(self.session_id, "5_certificate_print_page", driver.page_source)
+
         self.service.add_log("Rendering certificate to PDF")
         self.service.set_progress(90)
-        pdf_result = driver.execute_cdp_cmd("Page.printToPDF", {"printBackground": True})
+        try:
+            # Make the screen layout as wide as the printable area, then
+            # measure. If the content is wider, shrink it so nothing is cut.
+            driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+                "width": PRINTABLE_PX, "height": 1100,
+                "deviceScaleFactor": 1, "mobile": False,
+            })
+            time.sleep(0.5)
+            content_w = driver.execute_script(JS_CONTENT_WIDTH) or PRINTABLE_PX
+            scale = 1.0 if content_w <= PRINTABLE_PX else max(0.4, round(PRINTABLE_PX / content_w, 2))
+            self.service.add_log(f"Print width {content_w}px, scale {scale}")
+
+            pdf_result = driver.execute_cdp_cmd("Page.printToPDF", {
+                "printBackground": True,
+                "paperWidth": PAPER_W_IN,
+                "paperHeight": PAPER_H_IN,
+                "marginTop": MARGIN_IN, "marginBottom": MARGIN_IN,
+                "marginLeft": MARGIN_IN, "marginRight": MARGIN_IN,
+                "scale": scale,
+            })
+        finally:
+            try:
+                driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+            except Exception:
+                pass
         return pdf_result["data"]
+     
