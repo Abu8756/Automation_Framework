@@ -49,7 +49,8 @@ ANNEXURE_STYLE = (
     "text-align: center; padding-left: 0%; padding-right: 25%; "
     "page-break-before: always"
 )
-ANNEXURE_FONT_PX = 8  # try 11 if it spills to a 2nd page, 13 if too small
+ANNEXURE_FONT_PX = 6  # try 11 if it spills to a 2nd page, 13 if too small
+
 
 
 # Shrink ONLY the annexure if it is wider than the printable width.
@@ -75,7 +76,13 @@ body {{ margin: 0 !important; }}
 #divAnnx div {{ overflow: visible !important; }}
 #divAnnx, #divAnnx table {{ max-width: 100% !important; }}
 #divAnnx, #divAnnx * {{ font-size: {ANNEXURE_FONT_PX}px !important; }}
-tr, img {{ page-break-inside: avoid; }}
+
+/* let big/nested tables flow across pages by content */
+table, tbody, td {{ break-inside: auto !important; page-break-inside: auto !important; }}
+
+/* only keep small leaf rows (no nested table) from splitting mid-row */
+tr:not(:has(table)) {{ break-inside: avoid; page-break-inside: avoid; }}
+img {{ break-inside: avoid; }}
 """
 
 
