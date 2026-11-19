@@ -49,17 +49,36 @@ ANNEXURE_STYLE = (
     "text-align: center; padding-left: 0%; padding-right: 25%; "
     "page-break-before: always"
 )
+ANNEXURE_FONT_PX = 8  # try 11 if it spills to a 2nd page, 13 if too small
 
-# A4 in inches, and the printable width in CSS px (96 dpi)
-PAPER_W_IN, PAPER_H_IN, MARGIN_IN = 8.27, 11.69, 0.3
-PRINTABLE_PX = int((PAPER_W_IN - 2 * MARGIN_IN) * 96)  # ~736
 
-PRINT_FIX_CSS = """
-body { margin: 0 !important; }
-#divAnnx div { overflow: visible !important; }
-#divAnnx, #divAnnx table { max-width: 100% !important; }
-tr, img { page-break-inside: avoid; }
+# Shrink ONLY the annexure if it is wider than the printable width.
+JS_ZOOM_ANNEXURE = """
+const a = document.getElementById('divAnnx');
+if (!a) { return 1; }
+a.style.zoom = '';
+const cw = a.scrollWidth, maxw = arguments[0];
+if (cw > maxw) {
+    const z = Math.max(0.4, maxw / cw);
+    a.style.zoom = z;
+    return z;
+}
+return 1;
 """
+
+# A4 in inches, and printable width in CSS px (96 dpi)
+PAPER_W_IN, PAPER_H_IN, MARGIN_IN = 8.27, 11.69, 0.4
+PRINTABLE_PX = int((PAPER_W_IN - 2 * MARGIN_IN) * 96)  # ~717
+
+PRINT_FIX_CSS = f"""
+body {{ margin: 0 !important; }}
+#divAnnx div {{ overflow: visible !important; }}
+#divAnnx, #divAnnx table {{ max-width: 100% !important; }}
+#divAnnx, #divAnnx * {{ font-size: {ANNEXURE_FONT_PX}px !important; }}
+tr, img {{ page-break-inside: avoid; }}
+"""
+
+
 
 # Same thing the site's printAllDiv('divallprint') does, minus window.print()
 JS_PREPARE_PRINT_ALL = """
@@ -277,7 +296,6 @@ class UdyamCertificate:
     #     self.service.set_progress(90)
     #     pdf_result = driver.execute_cdp_cmd("Page.printToPDF", {"printBackground": True})
     #     return pdf_result["data"]
-
     def _download_pdf(self):
         driver = self.driver
 
@@ -297,8 +315,7 @@ class UdyamCertificate:
             driver.switch_to.window(after_handles[-1])
             time.sleep(2)
 
-        # Show the annexure + restyle it + swap body to divallprint,
-        # exactly like the site's "Print with Annexure" button.
+        # Show annexure + restyle + swap body to divallprint (like the site's button)
         prepared = False
         for _ in range(10):
             if driver.execute_script(JS_PREPARE_PRINT_ALL, ANNEXURE_STYLE, PRINT_FIX_CSS):
@@ -315,29 +332,26 @@ class UdyamCertificate:
         self.service.add_log("Rendering certificate to PDF")
         self.service.set_progress(90)
         try:
-            # Make the screen layout as wide as the printable area, then
-            # measure. If the content is wider, shrink it so nothing is cut.
             driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
                 "width": PRINTABLE_PX, "height": 1100,
                 "deviceScaleFactor": 1, "mobile": False,
             })
             time.sleep(0.5)
-            content_w = driver.execute_script(JS_CONTENT_WIDTH) or PRINTABLE_PX
-            scale = 1.0 if content_w <= PRINTABLE_PX else max(0.4, round(PRINTABLE_PX / content_w, 2))
-            self.service.add_log(f"Print width {content_w}px, scale {scale}")
-
-            pdf_result = driver.execute_cdp_cmd("Page.printToPDF", {
-                "printBackground": True,
-                "paperWidth": PAPER_W_IN,
-                "paperHeight": PAPER_H_IN,
-                "marginTop": MARGIN_IN, "marginBottom": MARGIN_IN,
-                "marginLeft": MARGIN_IN, "marginRight": MARGIN_IN,
-                "scale": scale,
-            })
+            zoom = driver.execute_script(JS_ZOOM_ANNEXURE, PRINTABLE_PX)
+            self.service.add_log(f"Annexure zoom {zoom}")
         finally:
             try:
                 driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
             except Exception:
                 pass
+
+        pdf_result = driver.execute_cdp_cmd("Page.printToPDF", {
+            "printBackground": True,
+            "displayHeaderFooter": False,   # removes the date/title line at the top
+            "paperWidth": PAPER_W_IN,
+            "paperHeight": PAPER_H_IN,
+            "marginTop": MARGIN_IN, "marginBottom": MARGIN_IN,
+            "marginLeft": MARGIN_IN, "marginRight": MARGIN_IN,
+            "scale": 1,
+        })
         return pdf_result["data"]
-     
