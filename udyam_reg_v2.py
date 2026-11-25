@@ -1414,6 +1414,8 @@ class UdyamRegistration:
                 self.handle_alert()
                 print("Alert 1 accepted")
 
+                time.sleep(2)
+
                 # ---- What happened? ----
                 outcome, alert = self._wait_submit_outcome(timeout=15)
                 print("Submit outcome:", outcome)

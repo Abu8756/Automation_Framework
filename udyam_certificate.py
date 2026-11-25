@@ -49,7 +49,7 @@ ANNEXURE_STYLE = (
     "text-align: center; padding-left: 0%; padding-right: 25%; "
     "page-break-before: always"
 )
-ANNEXURE_FONT_PX = 6  # try 11 if it spills to a 2nd page, 13 if too small
+ANNEXURE_FONT_PX = 13  # try 11 if it spills to a 2nd page, 13 if too small
 
 
 
